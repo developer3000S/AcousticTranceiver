@@ -97,6 +97,7 @@ export const useAudioProcessor = (): AudioProcessorState => {
   
   const receivingStateRef = useRef<'IDLE' | 'DTMF_TEXT'>('IDLE');
   const currentMessageBufferRef = useRef<string>('');
+  const lastCharTimestampRef = useRef<number>(0);
   const decoderStateRef = useRef<'IDLE' | 'COOLDOWN'>('IDLE');
   const quietFramesCountRef = useRef(0);
   const ambientNoiseLevelRef = useRef(40);
@@ -110,23 +111,29 @@ export const useAudioProcessor = (): AudioProcessorState => {
   }, [decodedMessages]);
 
   const processDecodedChar = useCallback((char: string) => {
-    logger.log(`Character decoded: '${char}'`);
+    logger.log(`Символ декодирован: '${char}'`);
+    lastCharTimestampRef.current = performance.now();
     const timestamp = new Date().toLocaleTimeString('ru-RU');
 
     switch (char) {
         case '*':
-            if (receivingStateRef.current !== 'IDLE') {
-                logger.warn(`New '*' signal received during active session. Resetting.`);
+            if (receivingStateRef.current !== 'IDLE' && currentMessageBufferRef.current.length > 0) {
+                logger.warn(`Новый стартовый сигнал (*) получен во время активной сессии. Предыдущее сообщение отброшено.`);
+                const prevBuffer = currentMessageBufferRef.current;
+                soundService.playError();
+                setDecodedMessages(prev => [...prev, { text: `[Отброшено: ${prevBuffer}]`, status: 'error', timestamp }]);
+            } else if (receivingStateRef.current !== 'IDLE') {
+                logger.warn(`Новый стартовый сигнал (*) получен во время активной сессии. Сброс.`);
             }
             receivingStateRef.current = 'DTMF_TEXT';
             currentMessageBufferRef.current = '';
-            logger.info('DTMF_TEXT START signal (*) detected. Began receiving message.');
+            logger.info('Стартовый сигнал DTMF (*) обнаружен. Начало приема.');
             break;
 
         case '#':
             if (receivingStateRef.current === 'DTMF_TEXT') {
                 const digitString = currentMessageBufferRef.current;
-                logger.info(`DTMF_TEXT STOP signal (#) detected. Digit string: "${digitString}"`);
+                logger.info(`Стоп-сигнал DTMF (#) обнаружен. Строка цифр: "${digitString}"`);
 
                 if (digitString.length > 0 && digitString.length % 2 === 0) {
                     let decodedText = '';
@@ -136,22 +143,22 @@ export const useAudioProcessor = (): AudioProcessorState => {
                         if (decodedChar) {
                             decodedText += decodedChar;
                         } else {
-                            logger.warn(`Unknown 2-digit code received: ${code}`);
+                            logger.warn(`Неизвестный двухзначный код: ${code}`);
                             decodedText += '?';
                         }
                     }
-                    logger.info(`Successfully decoded DTMF_TEXT message: "${decodedText}"`);
+                    logger.info(`Сообщение успешно декодировано: "${decodedText}"`);
                     soundService.playSuccess();
                     setDecodedMessages(prev => [...prev, { text: decodedText, status: 'success', timestamp }]);
                 } else {
-                    logger.error(`Received corrupt DTMF_TEXT packet. Length is not even or is empty: ${digitString.length}`);
+                    logger.error(`Получен поврежденный пакет. Длина нечетная или пустая: ${digitString.length}`);
                     soundService.playError();
                     if (digitString.length > 0) {
-                        setDecodedMessages(prev => [...prev, { text: `[Corrupt: ${digitString}]`, status: 'error', timestamp }]);
+                        setDecodedMessages(prev => [...prev, { text: `[Повреждено: ${digitString}]`, status: 'error', timestamp }]);
                     }
                 }
             } else {
-                logger.warn(`'#' signal received outside of DTMF_TEXT session. Ignoring.`);
+                logger.warn(`Стоп-сигнал (#) получен вне сессии. Игнорируется.`);
             }
             receivingStateRef.current = 'IDLE';
             currentMessageBufferRef.current = '';
@@ -162,7 +169,7 @@ export const useAudioProcessor = (): AudioProcessorState => {
                 if (/\d/.test(char)) {
                     currentMessageBufferRef.current += char;
                 } else {
-                    logger.warn(`Ignoring non-digit character '${char}' during DTMF_TEXT reception.`);
+                    logger.warn(`Игнорируется нецифровой символ '${char}' во время приема.`);
                 }
             }
             break;
@@ -174,6 +181,24 @@ export const useAudioProcessor = (): AudioProcessorState => {
 
   const analysisLoop = useCallback(() => {
     if (!analyserRef.current || !audioContextRef.current) return;
+
+    const MESSAGE_TIMEOUT_MS = 5000;
+    if (
+      receivingStateRef.current === 'DTMF_TEXT' &&
+      performance.now() - lastCharTimestampRef.current > MESSAGE_TIMEOUT_MS
+    ) {
+      logger.warn(`Сообщение не завершено в течение ${MESSAGE_TIMEOUT_MS / 1000}с. Сброс.`);
+      const digitString = currentMessageBufferRef.current;
+
+      if (digitString.length > 0) {
+        soundService.playError();
+        const timestamp = new Date().toLocaleTimeString('ru-RU');
+        setDecodedMessages(prev => [...prev, { text: `[Тайм-аут: ${digitString}]`, status: 'error', timestamp }]);
+      }
+      
+      receivingStateRef.current = 'IDLE';
+      currentMessageBufferRef.current = '';
+    }
 
     const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
     analyserRef.current.getByteFrequencyData(dataArray);
@@ -238,9 +263,9 @@ export const useAudioProcessor = (): AudioProcessorState => {
             if (maxOverallAmplitude < newThreshold) {
                 quietFramesCountRef.current++;
             } else {
-                quietFramesCountRef.current = Math.max(0, quietFramesCountRef.current - 1);
+                quietFramesCountRef.current = 0;
             }
-            if (quietFramesCountRef.current >= 3) {
+            if (quietFramesCountRef.current >= 2) { // Use 2 frames (~33ms) to be compatible with fastest protocol (35ms pause).
                 decoderStateRef.current = 'IDLE';
             }
             break;
@@ -251,7 +276,7 @@ export const useAudioProcessor = (): AudioProcessorState => {
   
   const startListening = useCallback(async () => {
     if (isListening) return;
-    logger.info('Attempting to start listening...');
+    logger.info('Попытка начать прослушивание...');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -273,13 +298,14 @@ export const useAudioProcessor = (): AudioProcessorState => {
       
       receivingStateRef.current = 'IDLE';
       currentMessageBufferRef.current = '';
+      lastCharTimestampRef.current = 0;
       decoderStateRef.current = 'IDLE';
       quietFramesCountRef.current = 0;
 
       animationFrameIdRef.current = requestAnimationFrame(analysisLoop);
-      logger.info('Successfully started listening.');
+      logger.info('Прослушивание успешно начато.');
     } catch (err) {
-      logger.error('Error accessing microphone:', err);
+      logger.error('Ошибка доступа к микрофону:', err);
       setError('Доступ к микрофону запрещен. Пожалуйста, разрешите доступ к микрофону в настройках вашего браузера.');
       soundService.playError();
     }
@@ -287,13 +313,13 @@ export const useAudioProcessor = (): AudioProcessorState => {
 
   const stopListening = useCallback(() => {
     if (!isListening) return;
-    logger.info('Stopping listening...');
+    logger.info('Остановка прослушивания...');
     
     cancelAnimationFrame(animationFrameIdRef.current);
     
     streamRef.current?.getTracks().forEach(track => track.stop());
     sourceRef.current?.disconnect();
-    audioContextRef.current?.close().catch(e => logger.warn("Error closing AudioContext", e));
+    audioContextRef.current?.close().catch(e => logger.warn("Ошибка при закрытии AudioContext", e));
 
     streamRef.current = null;
     sourceRef.current = null;
@@ -304,16 +330,16 @@ export const useAudioProcessor = (): AudioProcessorState => {
     currentMessageBufferRef.current = '';
     decoderStateRef.current = 'IDLE';
     quietFramesCountRef.current = 0;
-    logger.info('Receiver state has been reset.');
+    logger.info('Состояние приемника сброшено.');
 
     setIsListening(false);
     setSignalQuality('none');
-    logger.info('Stopped listening.');
+    logger.info('Прослушивание остановлено.');
   }, [isListening]);
 
   const clearDecodedMessages = useCallback(() => {
     setDecodedMessages([]);
-    logger.info('Decoded text cleared by user.');
+    logger.info('Декодированные сообщения очищены пользователем.');
   }, []);
   
   useEffect(() => {
