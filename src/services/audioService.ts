@@ -1,4 +1,4 @@
-import { START_CHAR, STOP_CHAR, CHECKSUM_CHAR_CANDIDATES, Protocol } from '../constants';
+import { Protocol } from '../constants';
 import logger from './logger';
 
 let audioContext: AudioContext | null = null;
@@ -9,20 +9,6 @@ const getAudioContext = (): AudioContext => {
     logger.info('AudioContext created or recreated.');
   }
   return audioContext;
-};
-
-/**
- * Calculates a simple checksum for a message.
- * The checksum character is selected from a list of known transmittable characters.
- * @param message The message to process.
- * @returns A single character representing the checksum.
- */
-export const calculateChecksum = (message: string): string => {
-  if (!message) return CHECKSUM_CHAR_CANDIDATES[0];
-  // Simple XOR checksum
-  const sum = message.split('').reduce((acc, char) => acc ^ char.charCodeAt(0), 0);
-  const index = sum % CHECKSUM_CHAR_CANDIDATES.length;
-  return CHECKSUM_CHAR_CANDIDATES[index];
 };
 
 /**
@@ -63,24 +49,15 @@ export const playMessage = async (
   message: string,
   volume: number,
   protocol: Protocol,
-  pauseDuration: number,
   onProgress: (currentIndex: number | null, totalLength: number, currentToken: string | null, currentFreq: number | null) => void
 ): Promise<void> => {
   logger.info('Starting message transmission:', message);
 
-  let transmissionTokens: string[];
-  const { charToFreqMap, toneDuration } = protocol;
+  const { charToFreqMap, toneDuration, pauseDuration } = protocol;
 
-  if (protocol.customPacketHandling && protocol.transform) {
-    const fullPacket = protocol.transform(message);
-    transmissionTokens = fullPacket.split('');
-    logger.info(`Full packet (custom handling): ${fullPacket}`);
-  } else {
-    const transformedMessage = protocol.transform ? protocol.transform(message) : message;
-    const checksum = calculateChecksum(transformedMessage);
-    transmissionTokens = [START_CHAR, ...transformedMessage.split(''), checksum, STOP_CHAR];
-    logger.info(`Full packet: [START]${transformedMessage}[${checksum}][STOP]`);
-  }
+  const fullPacket = protocol.transform(message);
+  const transmissionTokens = fullPacket.split('');
+  logger.info(`Full packet (custom handling): ${fullPacket}`);
   
   for (let i = 0; i < transmissionTokens.length; i++) {
     const token = transmissionTokens[i];
@@ -165,24 +142,15 @@ export const generateMessageWav = async (
     message: string,
     volume: number,
     protocol: Protocol,
-    pauseDuration: number,
 ): Promise<Blob | null> => {
     try {
         logger.info('Starting WAV generation for message:', message);
         
-        const { charToFreqMap, toneDuration } = protocol;
-        let transmissionTokens: string[];
+        const { charToFreqMap, toneDuration, pauseDuration } = protocol;
 
-        if (protocol.customPacketHandling && protocol.transform) {
-            const fullPacket = protocol.transform(message);
-            transmissionTokens = fullPacket.split('');
-            logger.info(`Full packet for WAV (custom handling): ${fullPacket}`);
-        } else {
-            const transformedMessage = protocol.transform ? protocol.transform(message) : message;
-            const checksum = calculateChecksum(transformedMessage);
-            transmissionTokens = [START_CHAR, ...transformedMessage.split(''), checksum, STOP_CHAR];
-            logger.info(`Full packet for WAV: [START]${transformedMessage}[${checksum}][STOP]`);
-        }
+        const fullPacket = protocol.transform(message);
+        const transmissionTokens = fullPacket.split('');
+        logger.info(`Full packet for WAV (custom handling): ${fullPacket}`);
         
         const initialPauseSeconds = 1; // Add a 1-second pause at the beginning
 
