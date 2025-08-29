@@ -13,14 +13,25 @@ const NUM_BINS_TO_SHOW = 256;
 const FrequencyVisualizer: React.FC<FrequencyVisualizerProps> = ({ data, isListening, sampleRate, threshold }) => {
   const validBins = useMemo(() => {
     const FREQ_PER_BIN = sampleRate / RECEIVER_CONFIG.FFT_SIZE;
+    if (FREQ_PER_BIN === 0) return new Set<number>(); // Prevent division by zero
+
     const bins = new Set<number>();
-    
-    // Highlight all standard DTMF frequencies
-    Object.values(DTMF_FREQUENCIES).flat().forEach(freq => {
-        const bin = Math.round(freq / FREQ_PER_BIN);
-        if (bin < NUM_BINS_TO_SHOW) {
-            bins.add(bin);
+    const tolerance = RECEIVER_CONFIG.DTMF_FREQUENCY_TOLERANCE; // 15 Hz
+
+    const uniqueFrequencies = [...new Set(Object.values(DTMF_FREQUENCIES).flat())];
+
+    uniqueFrequencies.forEach(centerFreq => {
+      const startFreq = centerFreq - tolerance;
+      const endFreq = centerFreq + tolerance;
+
+      const startBin = Math.floor(startFreq / FREQ_PER_BIN);
+      const endBin = Math.ceil(endFreq / FREQ_PER_BIN);
+
+      for (let bin = startBin; bin <= endBin; bin++) {
+        if (bin >= 0 && bin < NUM_BINS_TO_SHOW) {
+          bins.add(bin);
         }
+      }
     });
 
     return bins;
@@ -64,7 +75,7 @@ const FrequencyVisualizer: React.FC<FrequencyVisualizerProps> = ({ data, isListe
                 className={`flex-1 transition-all duration-75 ease-out ${
                   isHot 
                   ? 'bg-gradient-to-t from-amber-400 to-red-500' 
-                  : 'bg-gradient-to-t from-cyan-400 to-purple-500'
+                  : 'bg-gradient-to-t from-blue-500 to-purple-600'
                 }`}
                 style={{
                   height: `${(value / 255) * 100}%`,

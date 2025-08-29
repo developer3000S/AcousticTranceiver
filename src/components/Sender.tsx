@@ -28,7 +28,6 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState<boolean>(false);
   const [wavUrl, setWavUrl] = useState<string | null>(null);
-  const [isLinkCopied, setIsLinkCopied] = useState<boolean>(false);
 
   const initialTemplates = ["Да", "Как дела?", "Нет", "Перезвони мне", "Пока", "Привет!", "Скоро буду", "Спасибо!", "Хорошо", "Я за рулем"];
 
@@ -41,10 +40,7 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
       return initialTemplates;
     }
   });
-  const [newTemplate, setNewTemplate] = useState<string>('');
   const [selectedTemplate, setSelectedTemplate] = useState<string>('');
-  const [isAddingTemplate, setIsAddingTemplate] = useState<boolean>(false);
-  const [templateError, setTemplateError] = useState<string | null>(null);
   
   const currentProtocol = useMemo((): Protocol => {
     if (protocolId === 'custom') {
@@ -78,35 +74,6 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
     };
   }, [wavUrl]);
 
-  const handleAddTemplate = () => {
-    soundService.playClick();
-    const trimmedTemplate = newTemplate.trim();
-    if (!trimmedTemplate) {
-      setTemplateError('Шаблон не может быть пустым.');
-      soundService.playError();
-      return;
-    }
-    if (templates.includes(trimmedTemplate)) {
-      setTemplateError('Такой шаблон уже существует.');
-      soundService.playError();
-      return;
-    }
-    
-    setTemplates([...templates, trimmedTemplate].sort((a, b) => a.localeCompare(b)));
-    setNewTemplate('');
-    setTemplateError(null);
-    logger.info(`Шаблон добавлен: "${trimmedTemplate}"`);
-    setIsAddingTemplate(false);
-    soundService.playSuccess();
-  };
-  
-  const handleCancelAddTemplate = () => {
-    soundService.playClick();
-    setNewTemplate('');
-    setTemplateError(null);
-    setIsAddingTemplate(false);
-  };
-
   const handleRemoveTemplate = () => {
     soundService.playClick();
     if (!selectedTemplate) return;
@@ -129,11 +96,6 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
       setSelectedTemplate(template);
       setMessage(template);
       setError(null);
-      if (isAddingTemplate) {
-        setIsAddingTemplate(false);
-        setNewTemplate('');
-        setTemplateError(null);
-      }
     }
   };
 
@@ -144,7 +106,6 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
     }
     if (wavUrl) {
         setWavUrl(null);
-        setIsLinkCopied(false);
     }
   };
 
@@ -172,7 +133,6 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
     soundService.playClick();
     if (wavUrl) {
         setWavUrl(null);
-        setIsLinkCopied(false);
     }
     if (!message || commonButtonDisabled) return;
     setError(null);
@@ -256,7 +216,6 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
     soundService.playClick();
     if (wavUrl) {
         setWavUrl(null);
-        setIsLinkCopied(false);
     }
     if (!message || commonButtonDisabled) return;
     setError(null);
@@ -408,13 +367,6 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
                   >
                       <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
                   </button>
-                  <button
-                      onClick={() => { soundService.playClick(); setIsAddingTemplate(true); }} disabled={commonButtonDisabled || isAddingTemplate}
-                      className="p-2 bg-gray-200 dark:bg-gray-800 hover:bg-cyan-500/20 dark:hover:bg-cyan-600/50 disabled:opacity-50 disabled:cursor-not-allowed text-gray-500 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-white rounded-md transition-colors"
-                      aria-label="Добавить новый шаблон" title="Добавить новый шаблон"
-                  >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
-                  </button>
               </div>
             </div>
 
@@ -433,74 +385,72 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
             </button>
             <div
               id="sender-settings"
-              className={`transition-all duration-300 ease-in-out overflow-hidden ${showSettings ? 'max-h-[800px] pt-4 mt-2 border-t border-gray-200 dark:border-gray-800' : 'max-h-0'}`}
+              className={`transition-all duration-500 ease-in-out overflow-hidden ${showSettings ? 'max-h-[800px] opacity-100 pt-4 mt-2 border-t border-gray-200 dark:border-gray-800' : 'max-h-0 opacity-0'}`}
             >
-              {showSettings && (
-                <div className="space-y-6">
-                  <fieldset>
-                      <legend className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Режим передачи</legend>
-                      <div className="space-y-2">
-                          {Object.values(PROTOCOLS).filter(p => p.id !== 'custom').map(protocol => (
-                              <label key={protocol.id} className="flex items-start p-3 bg-gray-100 dark:bg-gray-900 rounded-md cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors border border-gray-200 dark:border-gray-800 has-[:checked]:border-cyan-500 has-[:checked]:bg-cyan-500/10 dark:has-[:checked]:bg-cyan-900/20">
-                                  <input
-                                      type="radio" name="protocol" value={protocol.id} checked={protocolId === protocol.id}
-                                      onChange={() => setProtocolId(protocol.id)}
-                                      className="h-4 w-4 mt-1 text-cyan-600 bg-gray-300 dark:bg-gray-700 border-gray-400 dark:border-gray-600 focus:ring-cyan-500"
-                                      disabled={commonButtonDisabled}
-                                  />
-                                  <div className="ml-3 text-sm">
-                                      <span className="font-medium text-gray-900 dark:text-white">{protocol.name}</span>
-                                      <p className="text-gray-600 dark:text-gray-400">{protocol.description}</p>
-                                  </div>
-                              </label>
-                          ))}
-                      </div>
-                  </fieldset>
+              <div className="space-y-6">
+                <fieldset>
+                    <legend className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Режим передачи</legend>
+                    <div className="space-y-2">
+                        {Object.values(PROTOCOLS).filter(p => p.id !== 'custom').map(protocol => (
+                            <label key={protocol.id} className="flex items-start p-3 bg-gray-100 dark:bg-gray-900 rounded-md cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors border border-gray-200 dark:border-gray-800 has-[:checked]:border-cyan-500 has-[:checked]:bg-cyan-500/10 dark:has-[:checked]:bg-cyan-900/20">
+                                <input
+                                    type="radio" name="protocol" value={protocol.id} checked={protocolId === protocol.id}
+                                    onChange={() => setProtocolId(protocol.id)}
+                                    className="h-4 w-4 mt-1 text-cyan-600 bg-gray-300 dark:bg-gray-700 border-gray-400 dark:border-gray-600 focus:ring-cyan-500"
+                                    disabled={commonButtonDisabled}
+                                />
+                                <div className="ml-3 text-sm">
+                                    <span className="font-medium text-gray-900 dark:text-white">{protocol.name}</span>
+                                    <p className="text-gray-600 dark:text-gray-400">{protocol.description}</p>
+                                </div>
+                            </label>
+                        ))}
+                    </div>
+                </fieldset>
 
-                  <div className="p-4 bg-gray-100 dark:bg-gray-900 rounded-md border border-gray-200 dark:border-gray-800 space-y-4">
-                    <p className={`text-sm font-medium text-center transition-colors ${protocolId === 'custom' ? 'text-cyan-500 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-300'}`}>
-                      {protocolId === 'custom' ? 'Выбран пользовательский режим' : 'Ручная настройка (переключит в Пользовательский режим)'}
-                    </p>
-                    <div>
-                      <label htmlFor="tone-duration-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Длительность тона</label>
-                      <div className="flex items-center gap-4">
-                        <input
-                          id="tone-duration-slider" type="range" min="50" max="600" step="10" value={toneDuration}
-                          onChange={(e) => { setToneDuration(parseInt(e.target.value, 10)); setProtocolId('custom'); }}
-                          className="w-full h-2 bg-gray-300 dark:bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:opacity-50"
-                          disabled={commonButtonDisabled}
-                        />
-                        <span className="text-sm font-medium text-gray-500 dark:text-gray-400 w-12 text-right">{toneDuration} мс</span>
-                      </div>
-                    </div>
-                    <div>
-                      <label htmlFor="pause-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Пауза между символами</label>
-                      <div className="flex items-center gap-4">
-                        <input
-                          id="pause-slider" type="range" min="25" max="500" step="5" value={pauseDuration}
-                          onChange={(e) => { setPauseDuration(parseInt(e.target.value, 10)); setProtocolId('custom'); }}
-                          className="w-full h-2 bg-gray-300 dark:bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:opacity-50"
-                          disabled={commonButtonDisabled}
-                        />
-                        <span className="text-sm font-medium text-gray-500 dark:text-gray-400 w-12 text-right">{pauseDuration} мс</span>
-                      </div>
-                    </div>
-                  </div>
-                  
+                <div className="p-4 bg-gray-100 dark:bg-gray-900 rounded-md border border-gray-200 dark:border-gray-800 space-y-4">
+                  <p className={`text-sm font-medium text-center transition-colors ${protocolId === 'custom' ? 'text-cyan-500 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-300'}`}>
+                    {protocolId === 'custom' ? 'Выбран пользовательский режим' : 'Ручная настройка (переключит в Пользовательский режим)'}
+                  </p>
                   <div>
-                    <label htmlFor="volume-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Громкость передачи</label>
+                    <label htmlFor="tone-duration-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Длительность тона</label>
                     <div className="flex items-center gap-4">
                       <input
-                        id="volume-slider" type="range" min="0" max="1" step="0.01" value={volume}
-                        onChange={(e) => setVolume(parseFloat(e.target.value))}
+                        id="tone-duration-slider" type="range" min="50" max="600" step="10" value={toneDuration}
+                        onChange={(e) => { setToneDuration(parseInt(e.target.value, 10)); setProtocolId('custom'); }}
                         className="w-full h-2 bg-gray-300 dark:bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:opacity-50"
                         disabled={commonButtonDisabled}
                       />
-                      <span className="text-sm font-medium text-gray-500 dark:text-gray-400 w-12 text-right">{Math.round(volume * 100)}%</span>
+                      <span className="text-sm font-medium text-gray-500 dark:text-gray-400 w-12 text-right">{toneDuration} мс</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label htmlFor="pause-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Пауза между символами</label>
+                    <div className="flex items-center gap-4">
+                      <input
+                        id="pause-slider" type="range" min="25" max="500" step="5" value={pauseDuration}
+                        onChange={(e) => { setPauseDuration(parseInt(e.target.value, 10)); setProtocolId('custom'); }}
+                        className="w-full h-2 bg-gray-300 dark:bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:opacity-50"
+                        disabled={commonButtonDisabled}
+                      />
+                      <span className="text-sm font-medium text-gray-500 dark:text-gray-400 w-12 text-right">{pauseDuration} мс</span>
                     </div>
                   </div>
                 </div>
-              )}
+                
+                <div>
+                  <label htmlFor="volume-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Громкость передачи</label>
+                  <div className="flex items-center gap-4">
+                    <input
+                      id="volume-slider" type="range" min="0" max="1" step="0.01" value={volume}
+                      onChange={(e) => setVolume(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-gray-300 dark:bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:opacity-50"
+                      disabled={commonButtonDisabled}
+                    />
+                    <span className="text-sm font-medium text-gray-500 dark:text-gray-400 w-12 text-right">{Math.round(volume * 100)}%</span>
+                  </div>
+                </div>
+              </div>
             </div>
             
             {(isTransmitting || isTesting) && (
@@ -509,6 +459,11 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-cyan-500 dark:text-cyan-300">{isTesting ? 'Прогресс теста:' : 'Передача:'}</span>
                     <span className="font-mono text-lg px-2 py-0.5 bg-gray-200 dark:bg-gray-800 rounded text-cyan-500 dark:text-cyan-300">{getDisplayChar(transmittingChar)}</span>
+                    {transmittingFreq && (
+                      <span className="text-xs font-mono text-cyan-500 dark:text-cyan-400">
+                        {Math.round(transmittingFreq)} Гц
+                      </span>
+                    )}
                     <span className="text-sm font-medium text-gray-500 dark:text-gray-400">({Math.ceil(transmissionProgress / 100 * effectiveMessageLength)}/{effectiveMessageLength})</span>
                   </div>
                   <span className="text-sm font-medium text-cyan-500 dark:text-cyan-300">{transmissionProgress.toFixed(0)}%</span>
