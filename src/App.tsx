@@ -137,7 +137,7 @@ const App: React.FC = () => {
         </section>
 
         <footer className="text-center mt-12 text-gray-500 text-sm">
-          <p>2025 © All rights reserved. Created by developer3000@mail.ru</p>
+          <p>Создано с помощью React, TypeScript и Tailwind CSS. Работает на Web Audio API.</p>
         </footer>
       </div>
     </div>

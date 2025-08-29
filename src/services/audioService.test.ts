@@ -37,12 +37,12 @@ describe('audioService', () => {
 
     it('should generate a non-empty WAV blob for a valid message', async () => {
       const protocol = PROTOCOLS.standard;
+      // FIX: Pass the protocol object and pause duration, matching the function signature.
       const blob = await generateMessageWav(
         'test',
         1,
-        protocol.toneDuration,
-        protocol.pauseDuration,
-        protocol.charToFreqMap
+        protocol,
+        protocol.pauseDuration
       );
 
       expect(blob).toBeInstanceOf(Blob);
@@ -53,12 +53,12 @@ describe('audioService', () => {
     
     it('should handle an empty message gracefully, generating a WAV with only control signals', async () => {
       const protocol = PROTOCOLS.standard;
+      // FIX: Pass the protocol object and pause duration, matching the function signature.
       const blob = await generateMessageWav(
         '', // Empty message
         1,
-        protocol.toneDuration,
-        protocol.pauseDuration,
-        protocol.charToFreqMap
+        protocol,
+        protocol.pauseDuration
       );
 
       expect(blob).toBeInstanceOf(Blob);

@@ -3,16 +3,16 @@ import React, { useMemo } from 'react';
 // FIX: Update props to accept a character-to-frequency map to support different protocols.
 interface TransmissionVisualizerProps {
   currentFrequency: number | null;
-  charToFreqMap: Map<string, number>;
+  charToFreqMap: Map<string, number | number[]>;
 }
 
 const NUM_BINS = 64; // Number of visual bins
 
 const TransmissionVisualizer: React.FC<TransmissionVisualizerProps> = ({ currentFrequency, charToFreqMap }) => {
-  // FIX: Calculate frequency range inside the component and memoize it. This resolves type errors.
-  // FIX: Removed unused MAX_FREQ from destructuring to fix TS6133 build error.
+  // FIX: Use .flat() to handle maps that contain both numbers and arrays of numbers (for DTMF).
+  // This correctly calculates the frequency range for the visualizer across all protocols.
   const { MIN_FREQ, FREQ_RANGE } = useMemo(() => {
-    const frequencies = Array.from(charToFreqMap.values());
+    const frequencies = Array.from(charToFreqMap.values()).flat();
     if (frequencies.length === 0) {
         return { MIN_FREQ: 0, MAX_FREQ: 0, FREQ_RANGE: 0 };
     }

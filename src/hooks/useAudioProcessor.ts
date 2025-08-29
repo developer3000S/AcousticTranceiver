@@ -7,6 +7,9 @@ import {
   CHARACTERS,
   START_FREQ_SIGNAL,
   STOP_FREQ_SIGNAL,
+  DTMF_FREQUENCIES,
+  DTMF_CHARACTERS,
+  TEXT_DECODING_MAP
 } from '../constants';
 import logger from '../services/logger';
 import soundService from '../services/soundService';
@@ -76,6 +79,23 @@ const calculateSignalQuality = (
   return 'poor';
 };
 
+// Helper to find the peak frequency in a specific range of the spectrum
+const findPeakInBand = (
+    dataArray: Uint8Array,
+    startBin: number,
+    endBin: number,
+    freqPerBin: number
+): { peakFreq: number; peakAmp: number } => {
+    let peakAmp = 0;
+    let peakBin = 0;
+    for (let i = startBin; i <= endBin; i++) {
+        if (dataArray[i] > peakAmp) {
+            peakAmp = dataArray[i];
+            peakBin = i;
+        }
+    }
+    return { peakFreq: peakBin * freqPerBin, peakAmp };
+};
 
 export const useAudioProcessor = (): AudioProcessorState => {
   const [isListening, setIsListening] = useState(false);
@@ -105,7 +125,7 @@ export const useAudioProcessor = (): AudioProcessorState => {
   const animationFrameIdRef = useRef<number>(0);
   
   // State machine for receiving protocol packets
-  const isReceivingRef = useRef<boolean>(false);
+  const receivingStateRef = useRef<'IDLE' | 'FSK' | 'DTMF_TEXT'>('IDLE');
   const currentMessageBufferRef = useRef<string>('');
 
   // State machine for decoding tones to prevent duplicates.
@@ -152,6 +172,112 @@ export const useAudioProcessor = (): AudioProcessorState => {
     }
   }, [decodedMessages]);
 
+  const processDecodedChar = useCallback((char: string) => {
+    logger.log(`Character decoded: '${char}'`);
+    const timestamp = new Date().toLocaleTimeString('ru-RU');
+
+    // --- Universal Protocol State Machine ---
+    switch (char) {
+        case START_CHAR:
+            if (receivingStateRef.current !== 'IDLE') {
+                logger.warn(`New START signal received during active '${receivingStateRef.current}' session. Resetting.`);
+            }
+            receivingStateRef.current = 'FSK';
+            currentMessageBufferRef.current = '';
+            logger.info('FSK START signal detected. Began receiving message.');
+            break;
+
+        case STOP_CHAR:
+            if (receivingStateRef.current === 'FSK') {
+                const fullReceived = currentMessageBufferRef.current;
+                logger.info(`FSK STOP signal detected. Full packet: "${fullReceived}"`);
+                
+                if (fullReceived.length < 1) {
+                    logger.error('Received an empty FSK message packet.');
+                } else {
+                    const payload = fullReceived.slice(0, -1);
+                    const receivedChecksum = fullReceived.slice(-1);
+                    const calculatedChecksum = calculateChecksum(payload);
+
+                    if (receivedChecksum === calculatedChecksum) {
+                        logger.info(`Checksums match! ('${receivedChecksum}'). Message is valid.`);
+                        soundService.playSuccess();
+                        setDecodedMessages(prev => [...prev, { text: payload, status: 'success', timestamp }]);
+                    } else {
+                        logger.error(`Checksum mismatch! Received: '${receivedChecksum}', Calculated: '${calculatedChecksum}'. Message is corrupt.`);
+                        soundService.playError();
+                        setDecodedMessages(prev => [...prev, { text: payload, status: 'error', timestamp }]);
+                    }
+                }
+            } else {
+                logger.warn(`STOP signal received outside of FSK session (current state: ${receivingStateRef.current}). Ignoring.`);
+            }
+            receivingStateRef.current = 'IDLE';
+            currentMessageBufferRef.current = '';
+            break;
+
+        case '*':
+            if (receivingStateRef.current !== 'IDLE') {
+                logger.warn(`New '*' signal received during active '${receivingStateRef.current}' session. Resetting.`);
+            }
+            receivingStateRef.current = 'DTMF_TEXT';
+            currentMessageBufferRef.current = '';
+            logger.info('DTMF_TEXT START signal (*) detected. Began receiving message.');
+            break;
+
+        case '#':
+            if (receivingStateRef.current === 'DTMF_TEXT') {
+                const digitString = currentMessageBufferRef.current;
+                logger.info(`DTMF_TEXT STOP signal (#) detected. Digit string: "${digitString}"`);
+
+                if (digitString.length > 0 && digitString.length % 2 === 0) {
+                    let decodedText = '';
+                    for (let i = 0; i < digitString.length; i += 2) {
+                        const code = digitString.substring(i, i + 2);
+                        const decodedChar = TEXT_DECODING_MAP.get(code);
+                        if (decodedChar) {
+                            decodedText += decodedChar;
+                        } else {
+                            logger.warn(`Unknown 2-digit code received: ${code}`);
+                            decodedText += '?'; // Placeholder for unknown codes
+                        }
+                    }
+                    logger.info(`Successfully decoded DTMF_TEXT message: "${decodedText}"`);
+                    soundService.playSuccess();
+                    setDecodedMessages(prev => [...prev, { text: decodedText, status: 'success', timestamp }]);
+                } else {
+                    logger.error(`Received corrupt DTMF_TEXT packet. Length is not even or is empty: ${digitString.length}`);
+                    soundService.playError();
+                    if (digitString.length > 0) {
+                        setDecodedMessages(prev => [...prev, { text: `[Corrupt: ${digitString}]`, status: 'error', timestamp }]);
+                    }
+                }
+            } else {
+                logger.warn(`'#' signal received outside of DTMF_TEXT session (current state: ${receivingStateRef.current}). Ignoring.`);
+            }
+            receivingStateRef.current = 'IDLE';
+            currentMessageBufferRef.current = '';
+            break;
+
+        default:
+            // Append character to buffer if in a receiving state
+            if (receivingStateRef.current === 'FSK') {
+                currentMessageBufferRef.current += char;
+            } else if (receivingStateRef.current === 'DTMF_TEXT') {
+                // Only append digits to the buffer in this state
+                if (/\d/.test(char)) {
+                    currentMessageBufferRef.current += char;
+                } else {
+                    logger.warn(`Ignoring non-digit character '${char}' during DTMF_TEXT reception.`);
+                }
+            }
+            break;
+    }
+    
+    decoderStateRef.current = 'COOLDOWN';
+    quietFramesCountRef.current = 0;
+  }, []);
+
   const analysisLoop = useCallback(() => {
     if (!analyserRef.current || !audioContextRef.current) return;
 
@@ -159,22 +285,19 @@ export const useAudioProcessor = (): AudioProcessorState => {
     analyserRef.current.getByteFrequencyData(dataArray);
     setFrequencyData(dataArray);
 
-    let maxAmplitude = 0;
-    let maxIndex = 0;
+    let maxOverallAmplitude = 0;
     let totalAmplitude = 0;
 
     for (let i = 0; i < dataArray.length; i++) {
       totalAmplitude += dataArray[i];
-      if (dataArray[i] > maxAmplitude) {
-        maxAmplitude = dataArray[i];
-        maxIndex = i;
+      if (dataArray[i] > maxOverallAmplitude) {
+        maxOverallAmplitude = dataArray[i];
       }
     }
 
     // --- Automatic Gain Control (AGC) Logic ---
     const averageAmplitude = totalAmplitude / dataArray.length;
-    // Slowly adjust ambient noise level if the current frame is quiet
-    if (maxAmplitude < currentThreshold) {
+    if (maxOverallAmplitude < currentThreshold) {
       ambientNoiseLevelRef.current = ambientNoiseLevelRef.current * (1 - RECEIVER_CONFIG.AGC_NOISE_SENSITIVITY) + averageAmplitude * RECEIVER_CONFIG.AGC_NOISE_SENSITIVITY;
     }
     const newThreshold = Math.round(
@@ -187,98 +310,68 @@ export const useAudioProcessor = (): AudioProcessorState => {
     // --- End AGC Logic ---
     
     // Update UI signal quality
-    if (maxAmplitude > newThreshold) {
-        const quality = calculateSignalQuality(
-            maxAmplitude,
-            totalAmplitude,
-            newThreshold,
-            dataArray.length
-        );
+    if (maxOverallAmplitude > newThreshold) {
+        const quality = calculateSignalQuality(maxOverallAmplitude, totalAmplitude, newThreshold, dataArray.length);
         setSignalQuality(quality);
     } else {
         setSignalQuality('none');
     }
 
-
     // --- State-based Tone Decoding Logic ---
     switch (decoderStateRef.current) {
         case 'IDLE':
-            if (maxAmplitude > newThreshold) {
-                // A potential tone is detected. Let's identify it.
-                const detectedFreq = maxIndex * (audioContextRef.current.sampleRate / RECEIVER_CONFIG.FFT_SIZE);
-                let matchedChar: string | null = null;
-                
-                for (const [freq, char] of decodingMap.entries()) {
-                    if (Math.abs(detectedFreq - freq) <= RECEIVER_CONFIG.FREQUENCY_TOLERANCE) {
-                    matchedChar = char;
-                    break;
+            if (maxOverallAmplitude > newThreshold) {
+                const freqPerBin = audioContextRef.current.sampleRate / RECEIVER_CONFIG.FFT_SIZE;
+                let characterFound = false;
+
+                // --- 1. Attempt DTMF Decode First ---
+                const lowBand = findPeakInBand(dataArray, Math.round(650 / freqPerBin), Math.round(1000 / freqPerBin), freqPerBin);
+                const highBand = findPeakInBand(dataArray, Math.round(1150 / freqPerBin), Math.round(1550 / freqPerBin), freqPerBin);
+
+                if (lowBand.peakAmp > newThreshold && highBand.peakAmp > newThreshold) {
+                    let matchedLowFreq = 0;
+                    let matchedHighFreq = 0;
+                    
+                    for (const char of DTMF_CHARACTERS) {
+                        const [lowFreq, highFreq] = DTMF_FREQUENCIES[char];
+                        if (Math.abs(lowBand.peakFreq - lowFreq) <= RECEIVER_CONFIG.DTMF_FREQUENCY_TOLERANCE) matchedLowFreq = lowFreq;
+                        if (Math.abs(highBand.peakFreq - highFreq) <= RECEIVER_CONFIG.DTMF_FREQUENCY_TOLERANCE) matchedHighFreq = highFreq;
+                    }
+
+                    if (matchedLowFreq && matchedHighFreq) {
+                        for (const char of DTMF_CHARACTERS) {
+                            const [lowFreq, highFreq] = DTMF_FREQUENCIES[char];
+                            if (lowFreq === matchedLowFreq && highFreq === matchedHighFreq) {
+                                processDecodedChar(char);
+                                characterFound = true;
+                                break;
+                            }
+                        }
                     }
                 }
-
-                if (matchedChar) {
-                    // Character found! Process it and enter COOLDOWN.
-                    logger.log(`Character decoded: '${matchedChar}'`);
+                
+                // --- 2. Fallback to FSK (Single Tone) Decode ---
+                if (!characterFound) {
+                    const maxIndex = dataArray.indexOf(maxOverallAmplitude);
+                    const detectedFreq = maxIndex * freqPerBin;
                     
-                    // --- Protocol State Machine ---
-                    if (matchedChar === START_CHAR) {
-                        if (isReceivingRef.current) {
-                            logger.warn('New START signal received before STOP. Resetting message.');
+                    for (const [freq, char] of decodingMap.entries()) {
+                        if (Math.abs(detectedFreq - freq) <= RECEIVER_CONFIG.FREQUENCY_TOLERANCE) {
+                            processDecodedChar(char);
+                            characterFound = true;
+                            break;
                         }
-                        isReceivingRef.current = true;
-                        currentMessageBufferRef.current = '';
-                        logger.info('START signal detected. Began receiving message.');
-                    } else if (matchedChar === STOP_CHAR) {
-                        if (isReceivingRef.current) {
-                            const fullReceived = currentMessageBufferRef.current;
-                            logger.info(`STOP signal detected. Full packet: "${fullReceived}"`);
-                            
-                            isReceivingRef.current = false;
-                            currentMessageBufferRef.current = '';
-
-                            if (fullReceived.length < 1) {
-                                logger.error('Received an empty message packet.');
-                            } else {
-                                const payload = fullReceived.slice(0, -1);
-                                const receivedChecksum = fullReceived.slice(-1);
-                                const calculatedChecksum = calculateChecksum(payload);
-                                const timestamp = new Date().toLocaleTimeString('ru-RU');
-
-                                if (receivedChecksum === calculatedChecksum) {
-                                    logger.info(`Checksums match! ('${receivedChecksum}'). Message is valid.`);
-                                    soundService.playSuccess();
-                                    setDecodedMessages(prev => [...prev, { text: payload, status: 'success', timestamp }]);
-                                } else {
-                                    logger.error(`Checksum mismatch! Received: '${receivedChecksum}', Calculated: '${calculatedChecksum}'. Message is corrupt.`);
-                                    soundService.playError();
-                                    setDecodedMessages(prev => [...prev, { text: payload, status: 'error', timestamp }]);
-                                }
-                            }
-                        } else {
-                            logger.warn('STOP signal received without a START. Ignoring.');
-                        }
-                    } else if (isReceivingRef.current) {
-                        currentMessageBufferRef.current += matchedChar;
                     }
-                    // --- End Protocol State Machine ---
-                    
-                    decoderStateRef.current = 'COOLDOWN';
-                    // FIX: Explicitly reset the quiet frame counter when a new tone is detected.
-                    quietFramesCountRef.current = 0;
                 }
             }
             break;
 
         case 'COOLDOWN':
-            // FIX: A more resilient state transition that can tolerate single frames of noise/echo.
-            if (maxAmplitude < newThreshold) {
-                quietFramesCountRef.current++; // Increment on quiet frames.
+            if (maxOverallAmplitude < newThreshold) {
+                quietFramesCountRef.current++;
             } else {
-                // On a noisy frame, decrement the counter. This prevents a single
-                // noise spike from resetting our confidence that a pause is happening.
                 quietFramesCountRef.current = Math.max(0, quietFramesCountRef.current - 1);
             }
-
-            // Require 3 *net* quiet frames to be confident it's a pause.
             if (quietFramesCountRef.current >= 3) {
                 decoderStateRef.current = 'IDLE';
             }
@@ -286,7 +379,7 @@ export const useAudioProcessor = (): AudioProcessorState => {
     }
 
     animationFrameIdRef.current = requestAnimationFrame(analysisLoop);
-  }, [currentThreshold, decodingMap]);
+  }, [currentThreshold, decodingMap, processDecodedChar]);
   
   const startListening = useCallback(async () => {
     if (isListening) return;
@@ -311,7 +404,7 @@ export const useAudioProcessor = (): AudioProcessorState => {
       setError(null);
       
       // Reset protocol state
-      isReceivingRef.current = false;
+      receivingStateRef.current = 'IDLE';
       currentMessageBufferRef.current = '';
       decoderStateRef.current = 'IDLE';
       quietFramesCountRef.current = 0;
@@ -341,7 +434,7 @@ export const useAudioProcessor = (): AudioProcessorState => {
     analyserRef.current = null;
 
     // Resetting protocol state on stop to prevent corruption on next listen.
-    isReceivingRef.current = false;
+    receivingStateRef.current = 'IDLE';
     currentMessageBufferRef.current = '';
     decoderStateRef.current = 'IDLE';
     quietFramesCountRef.current = 0;

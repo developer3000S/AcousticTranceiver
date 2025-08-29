@@ -1,4 +1,4 @@
-import { START_CHAR, STOP_CHAR, CHECKSUM_CHAR_CANDIDATES } from '../constants';
+import { START_CHAR, STOP_CHAR, CHECKSUM_CHAR_CANDIDATES, Protocol } from '../constants';
 import logger from './logger';
 
 let audioContext: AudioContext | null = null;
@@ -25,26 +25,35 @@ export const calculateChecksum = (message: string): string => {
   return CHECKSUM_CHAR_CANDIDATES[index];
 };
 
-
-const playTone = (frequency: number, duration: number, volume: number): Promise<void> => {
+/**
+ * Plays one or more audio frequencies simultaneously.
+ * @param frequencies An array of frequencies to play.
+ * @param duration The duration in milliseconds.
+ * @param volume The playback volume (0 to 1).
+ * @returns A promise that resolves when the tone has finished playing.
+ */
+const playTones = (frequencies: number[], duration: number, volume: number): Promise<void> => {
   return new Promise(resolve => {
-    logger.log(`Playing tone: ${frequency}Hz for ${duration}ms at volume ${volume}`);
+    logger.log(`Playing tone(s): ${frequencies.join(', ')}Hz for ${duration}ms at volume ${volume}`);
     const context = getAudioContext();
-    const oscillator = context.createOscillator();
     const gainNode = context.createGain();
-
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(frequency, context.currentTime);
     gainNode.gain.setValueAtTime(volume, context.currentTime);
     gainNode.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + duration / 1000);
-
-    oscillator.connect(gainNode);
     gainNode.connect(context.destination);
 
-    oscillator.start(context.currentTime);
-    oscillator.stop(context.currentTime + duration / 1000);
+    const oscillators = frequencies.map(freq => {
+        const oscillator = context.createOscillator();
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(freq, context.currentTime);
+        oscillator.connect(gainNode);
+        return oscillator;
+    });
 
-    oscillator.onended = () => {
+    oscillators.forEach(osc => osc.start(context.currentTime));
+    oscillators.forEach(osc => osc.stop(context.currentTime + duration / 1000));
+
+    // Resolve when the first oscillator finishes, as they all have the same duration.
+    oscillators[0].onended = () => {
       resolve();
     };
   });
@@ -53,28 +62,36 @@ const playTone = (frequency: number, duration: number, volume: number): Promise<
 export const playMessage = async (
   message: string,
   volume: number,
-  toneDuration: number,
+  protocol: Protocol,
   pauseDuration: number,
-  charToFreqMap: Map<string, number>,
   onProgress: (currentIndex: number | null, totalLength: number, currentToken: string | null, currentFreq: number | null) => void
 ): Promise<void> => {
   logger.info('Starting message transmission:', message);
-  const checksum = calculateChecksum(message);
-  // FIX: Treat START, message characters, checksum, and STOP as an array of tokens
-  // to prevent iterating over the letters of the control words.
-  const transmissionTokens = [START_CHAR, ...message.split(''), checksum, STOP_CHAR];
-  
-  logger.info(`Full packet: [START]${message}[${checksum}][STOP]`);
 
+  let transmissionTokens: string[];
+  const { charToFreqMap, toneDuration } = protocol;
+
+  if (protocol.customPacketHandling && protocol.transform) {
+    const fullPacket = protocol.transform(message);
+    transmissionTokens = fullPacket.split('');
+    logger.info(`Full packet (custom handling): ${fullPacket}`);
+  } else {
+    const transformedMessage = protocol.transform ? protocol.transform(message) : message;
+    const checksum = calculateChecksum(transformedMessage);
+    transmissionTokens = [START_CHAR, ...transformedMessage.split(''), checksum, STOP_CHAR];
+    logger.info(`Full packet: [START]${transformedMessage}[${checksum}][STOP]`);
+  }
+  
   for (let i = 0; i < transmissionTokens.length; i++) {
     const token = transmissionTokens[i];
-    const freq = charToFreqMap.get(token);
+    const freqsValue = charToFreqMap.get(token);
+    const freqsArray = freqsValue ? (Array.isArray(freqsValue) ? freqsValue : [freqsValue]) : [];
 
-    // Pass token and frequency to callback
-    onProgress(i, transmissionTokens.length, token, freq ?? null);
+    // Pass token and the first frequency (for visualizer) to callback
+    onProgress(i, transmissionTokens.length, token, freqsArray.length > 0 ? freqsArray[0] : null);
 
-    if (freq) {
-      await playTone(freq, toneDuration, volume);
+    if (freqsArray.length > 0) {
+      await playTones(freqsArray, toneDuration, volume);
     } else {
         logger.warn(`Character '${token}' not in frequency map. Playing silence.`);
     }
@@ -147,19 +164,26 @@ const bufferToWav = (buffer: AudioBuffer): Blob => {
 export const generateMessageWav = async (
     message: string,
     volume: number,
-    toneDuration: number,
+    protocol: Protocol,
     pauseDuration: number,
-    charToFreqMap: Map<string, number>
 ): Promise<Blob | null> => {
     try {
         logger.info('Starting WAV generation for message:', message);
         
-        const checksum = calculateChecksum(message);
-        // FIX: Treat START, message characters, checksum, and STOP as an array of tokens
-        // to prevent iterating over the letters of the control words.
-        const transmissionTokens = [START_CHAR, ...message.split(''), checksum, STOP_CHAR];
-        logger.info(`Full packet for WAV: [START]${message}[${checksum}][STOP]`);
+        const { charToFreqMap, toneDuration } = protocol;
+        let transmissionTokens: string[];
 
+        if (protocol.customPacketHandling && protocol.transform) {
+            const fullPacket = protocol.transform(message);
+            transmissionTokens = fullPacket.split('');
+            logger.info(`Full packet for WAV (custom handling): ${fullPacket}`);
+        } else {
+            const transformedMessage = protocol.transform ? protocol.transform(message) : message;
+            const checksum = calculateChecksum(transformedMessage);
+            transmissionTokens = [START_CHAR, ...transformedMessage.split(''), checksum, STOP_CHAR];
+            logger.info(`Full packet for WAV: [START]${transformedMessage}[${checksum}][STOP]`);
+        }
+        
         const initialPauseSeconds = 1; // Add a 1-second pause at the beginning
 
         // Use an offline context to render the audio without playing it
@@ -171,18 +195,23 @@ export const generateMessageWav = async (
 
         let currentTime = initialPauseSeconds; // Start tones after the initial pause
         for (const token of transmissionTokens) {
-            const freq = charToFreqMap.get(token);
-            if (freq) {
-                const oscillator = offlineContext.createOscillator();
+            const freqsValue = charToFreqMap.get(token);
+            const freqsArray = freqsValue ? (Array.isArray(freqsValue) ? freqsValue : [freqsValue]) : [];
+
+            if (freqsArray.length > 0) {
                 const gainNode = offlineContext.createGain();
-                oscillator.type = 'sine';
-                oscillator.frequency.setValueAtTime(freq, currentTime);
                 gainNode.gain.setValueAtTime(volume, currentTime);
                 gainNode.gain.exponentialRampToValueAtTime(0.0001, currentTime + toneDuration / 1000);
-                oscillator.connect(gainNode);
                 gainNode.connect(offlineContext.destination);
-                oscillator.start(currentTime);
-                oscillator.stop(currentTime + toneDuration / 1000);
+
+                freqsArray.forEach(freq => {
+                    const oscillator = offlineContext.createOscillator();
+                    oscillator.type = 'sine';
+                    oscillator.frequency.setValueAtTime(freq, currentTime);
+                    oscillator.connect(gainNode);
+                    oscillator.start(currentTime);
+                    oscillator.stop(currentTime + toneDuration / 1000);
+                });
             }
             currentTime += (toneDuration + pauseDuration) / 1000;
         }

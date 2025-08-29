@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { playMessage, generateMessageWav } from '../services/audioService';
 import logger from '../services/logger';
 // FIX: Removed unused 'PAUSE_DURATION_MS' and incorrect 'CHAR_TO_FREQ_MAP'. Protocol-specific maps are used instead.
-import { ProtocolId, PROTOCOLS, CHARACTERS, START_CHAR, STOP_CHAR, START_FREQ_SIGNAL, STOP_FREQ_SIGNAL, Protocol } from '../constants';
+import { ProtocolId, PROTOCOLS, CHARACTERS, START_CHAR, STOP_CHAR, START_FREQ_SIGNAL, STOP_FREQ_SIGNAL, Protocol, TEXT_ENCODING_MAP } from '../constants';
 import TransmissionVisualizer from './TransmissionVisualizer';
 import soundService from '../services/soundService';
 
@@ -195,8 +195,20 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
   
   const commonButtonDisabled = isTransmitting || isSaving || isTesting;
 
-  const getEffectiveMessage = (msg: string, protocol: Protocol): string => {
-    return protocol.transform ? protocol.transform(msg) : msg;
+  const isCharSupported = (char: string, protocol: Protocol): boolean => {
+    if (protocol.id === 'text_to_dtmf') {
+      return TEXT_ENCODING_MAP.has(char.toLowerCase()) && !['*', '#'].includes(char);
+    }
+    return protocol.charToFreqMap.has(char);
+  };
+
+  const getTransmissionPayload = (msg: string, protocol: Protocol): string => {
+    if (protocol.id === 'text_to_dtmf') {
+      return msg.split('').filter(char => isCharSupported(char, protocol)).join('');
+    }
+    // Filter out unsupported characters before applying any transformations
+    const supportedMessage = msg.split('').filter(char => protocol.charToFreqMap.has(char)).join('');
+    return supportedMessage;
   }
 
   const handleTransmit = async () => {
@@ -209,15 +221,20 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
     setError(null);
     setIsTransmitting(true);
     try {
-      const effectiveMessage = getEffectiveMessage(message, currentProtocol);
+      const payload = getTransmissionPayload(message, currentProtocol);
+      if (!payload) {
+        logger.warn("Передача отменена: в сообщении нет поддерживаемых символов для выбранного протокола.");
+        setIsTransmitting(false);
+        return;
+      }
+
       logger.info(`Начало передачи аудио (протокол: ${currentProtocol.name})...`);
       
       await playMessage(
-        effectiveMessage, 
+        payload, 
         volume, 
-        currentProtocol.toneDuration, 
+        currentProtocol,
         pauseDuration, 
-        currentProtocol.charToFreqMap, 
         (index, totalLength, token, freq) => {
             setTransmittingFreq(freq);
             setTransmittingChar(token);
@@ -249,18 +266,32 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
     if (commonButtonDisabled) return;
 
     const TEST_MESSAGE = "Тест 123";
+    const DTMF_TEST_MESSAGE = "123*#";
+    const TEXT_TO_DTMF_TEST_MESSAGE = "тест 123";
+
+    let messageToTest: string;
+    switch(protocolId) {
+        case 'dtmf':
+            messageToTest = DTMF_TEST_MESSAGE;
+            break;
+        case 'text_to_dtmf':
+            messageToTest = TEXT_TO_DTMF_TEST_MESSAGE;
+            break;
+        default:
+            messageToTest = TEST_MESSAGE;
+    }
+    
     setError(null);
     setIsTesting(true);
 
     try {
-        const effectiveMessage = getEffectiveMessage(TEST_MESSAGE, currentProtocol);
+        const payload = getTransmissionPayload(messageToTest, currentProtocol);
         logger.info(`Начало тестовой передачи (протокол: ${currentProtocol.name})...`);
         await playMessage(
-            effectiveMessage, 
+            payload, 
             volume, 
-            currentProtocol.toneDuration, 
+            currentProtocol,
             pauseDuration, 
-            currentProtocol.charToFreqMap,
             (index, totalLength, token, freq) => {
                 setTransmittingFreq(freq);
                 setTransmittingChar(token);
@@ -296,9 +327,14 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
     setError(null);
     setIsSaving(true);
     try {
-      const effectiveMessage = getEffectiveMessage(message, currentProtocol);
+      const payload = getTransmissionPayload(message, currentProtocol);
+       if (!payload) {
+        logger.warn("Сохранение отменено: в сообщении нет поддерживаемых символов для выбранного протокола.");
+        setIsSaving(false);
+        return;
+      }
       logger.info(`Начало генерации WAV файла (протокол: ${currentProtocol.name})...`);
-      const blob = await generateMessageWav(effectiveMessage, volume, currentProtocol.toneDuration, pauseDuration, currentProtocol.charToFreqMap);
+      const blob = await generateMessageWav(payload, volume, currentProtocol, pauseDuration);
 
       if (blob) {
         const url = URL.createObjectURL(blob);
@@ -380,14 +416,12 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
   };
 
   const renderMessageWithHighlight = () => {
-    // FIX: Use the frequency map from the currently selected protocol to check for supported characters.
-    const charToFreqMap = currentProtocol.charToFreqMap;
     return message.split('').map((char, index) => {
-      const isSupported = charToFreqMap.has(char);
+      const supported = isCharSupported(char, currentProtocol);
 
       let className = 'transition-colors duration-100';
 
-      if (!isSupported) {
+      if (!supported) {
         className += ' text-red-400 underline decoration-wavy decoration-red-500';
       } else {
         className += isTransmitting ? 'text-gray-500 dark:text-gray-600' : 'text-gray-700 dark:text-gray-400';
@@ -404,12 +438,18 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
     });
   };
 
-  // FIX: Use the frequency map from the currently selected protocol to check for unsupported characters.
-  const hasUnsupportedChars = message.split('').some(char => !currentProtocol.charToFreqMap.has(char));
+  const hasUnsupportedChars = message.split('').some(char => !isCharSupported(char, currentProtocol));
   
   const canSaveAsTemplate = message.trim() && !templates.includes(message.trim());
   
-  const effectiveMessageLength = getEffectiveMessage(message, currentProtocol).length + 3; // START, CHECKSUM, STOP
+  const effectiveMessageLength = useMemo(() => {
+    const payload = getTransmissionPayload(message, currentProtocol);
+    if (currentProtocol.customPacketHandling && currentProtocol.transform) {
+        return currentProtocol.transform(payload).length;
+    }
+    return payload.length + 3; // START, CHECKSUM, STOP
+  }, [message, currentProtocol]);
+
 
   const getDisplayChar = (char: string | null): string => {
     if (char === START_CHAR) return 'START';
