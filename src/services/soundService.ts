@@ -1,43 +1,90 @@
-// A service to manage and play UI sound effects.
+// A service to manage and play UI sound effects using the Web Audio API for better performance and reliability.
+import logger from './logger';
 
 // Base64 encoded WAV files for minimal, dependency-free audio feedback.
 const sounds = {
-  click: 'data:audio/wav;base64,UklGRiIAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAATElTVBoAAABJTkZPSVNGVAAAAAwAAABDdXN0b20gRGF0YQAAAABkYXRhAgAAAP////8=',
-  success: 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAATElTVBoAAABJTkZPSVNGVAAAAAwAAABDdXN0b20gRGF0YQAAAABkYXRhCAAAAMDA3+DV6f3r/vE=',
-  error: 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAATElTVBoAAABJTkZPSVNGVAAAAAwAAABDdXN0b20gRGF0YQAAAABkYXRhCAAAAPDg3+zK6Pvj9+/=',
+  // FIX: Replaced previous base64 strings with valid, clean WAV files to prevent initialization errors.
+  click: 'data:audio/wav;base64,UklGRlIAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YVQAAAAAAGCAgQB/AP8A/wB/AH8BfwB/AH4AfwB/AH8Afv5/AH8AfwB/AP9/AP//fwCB',
+  success: 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YcAAAAAAAACAgIA/gICA/38AgP9/AICAgP9/AICAgP9/AIA=',
+  error: 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YcAAAAAAAACA/38AgP9/AICAgP9/AICAgP9/AICAgIA/gICA',
 };
 
-// Preload audio elements for responsiveness
-const audio = {
-  click: new Audio(sounds.click),
-  success: new Audio(sounds.success),
-  error: new Audio(sounds.error),
+type SoundKeys = keyof typeof sounds;
+
+let audioContext: AudioContext | null = null;
+const audioBuffers: Partial<Record<SoundKeys, AudioBuffer>> = {};
+let initPromise: Promise<void> | null = null;
+
+const initializeAudio = async () => {
+    if (typeof window === 'undefined' || !window.AudioContext) return;
+    try {
+        audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        
+        // A user interaction is required to start/resume the audio context.
+        // This is handled by the lazy initialization on the first playSound call.
+        if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+        }
+
+        const loadPromises = Object.keys(sounds).map(async (key) => {
+            const soundKey = key as SoundKeys;
+            const response = await fetch(sounds[soundKey]);
+            const arrayBuffer = await response.arrayBuffer();
+            if (audioContext) {
+                audioBuffers[soundKey] = await audioContext.decodeAudioData(arrayBuffer);
+            }
+        });
+        
+        await Promise.all(loadPromises);
+        logger.info("Сервис звуковых эффектов инициализирован.");
+    } catch (error) {
+        logger.error("Не удалось инициализировать сервис звуковых эффектов:", error);
+        // Reset so it can be tried again.
+        initPromise = null; 
+        audioContext = null;
+    }
 };
 
-// Set volumes for subtle effect
-audio.click.volume = 0.5;
-audio.success.volume = 0.4;
-audio.error.volume = 0.6;
+const ensureInitialized = (): Promise<void> => {
+    if (!initPromise) {
+        initPromise = initializeAudio();
+    }
+    return initPromise;
+};
 
-/**
- * Plays a sound effect.
- * @param sound The audio element to play.
- */
-const playSound = (sound: HTMLAudioElement) => {
-  // If the sound is already playing, reset it to the start to allow for rapid plays.
-  if (!sound.paused) {
-    sound.currentTime = 0;
-  }
-  sound.play().catch(error => {
-    // Autoplay can be blocked by the browser, we'll log this but not bother the user.
-    console.warn("Sound effect failed to play:", error);
-  });
+const playSound = async (key: SoundKeys, volume: number) => {
+    try {
+        await ensureInitialized();
+        const buffer = audioBuffers[key];
+
+        if (!audioContext || !buffer) {
+            logger.warn(`Аудиобуфер для '${key}' недоступен.`);
+            return;
+        }
+
+        // The user must interact with the document before audio can play.
+        if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+        }
+        
+        const source = audioContext.createBufferSource();
+        source.buffer = buffer;
+        
+        const gainNode = audioContext.createGain();
+        gainNode.gain.setValueAtTime(volume, audioContext.currentTime);
+        
+        source.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        source.start(0);
+    } catch (error) {
+        logger.error(`Не удалось воспроизвести звук '${key}':`, error);
+    }
 };
 
 const soundService = {
-  playClick: () => playSound(audio.click),
-  playSuccess: () => playSound(audio.success),
-  playError: () => playSound(audio.error),
+  playClick: () => playSound('click', 0.5),
+  playSuccess: () => playSound('success', 0.4),
+  playError: () => playSound('error', 0.6),
 };
 
 export default soundService;

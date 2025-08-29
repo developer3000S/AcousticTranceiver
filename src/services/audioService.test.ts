@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { generateMessageWav } from './audioService';
-import { PROTOCOLS } from '../constants';
+// FIX: Imported 'TRANSMISSION_PROTOCOL' as 'PROTOCOLS' is not exported from constants.
+import { TRANSMISSION_PROTOCOL } from '../constants';
 
 describe('audioService', () => {
   describe('generateMessageWav', () => {
@@ -9,7 +10,8 @@ describe('audioService', () => {
     // but does not verify the audio content itself.
 
     it('should generate a non-empty WAV blob for a valid message', async () => {
-      const protocol = PROTOCOLS.dtmf_standard;
+      // FIX: Use the correct imported protocol constant.
+      const protocol = TRANSMISSION_PROTOCOL;
       const blob = await generateMessageWav(
         'test',
         1,
@@ -23,7 +25,8 @@ describe('audioService', () => {
     });
     
     it('should handle an empty message gracefully, generating a WAV with only control signals', async () => {
-      const protocol = PROTOCOLS.dtmf_standard;
+      // FIX: Use the correct imported protocol constant.
+      const protocol = TRANSMISSION_PROTOCOL;
       const blob = await generateMessageWav(
         '', // Empty message
         1,

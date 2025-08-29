@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useAudioProcessor, SignalQuality } from '../hooks/useAudioProcessor';
 import FrequencyVisualizer from './FrequencyVisualizer';
 import soundService from '../services/soundService';
+import { FSK_CHAR_TO_FREQ_MAP } from '../constants';
 
 interface ReceiverProps {
   isCollapsed: boolean;
@@ -250,10 +251,7 @@ const Receiver: React.FC<ReceiverProps> = ({ isCollapsed, onToggle }) => {
             </div>
 
             <div>
-                <div className="flex justify-between items-center mb-1 flex-wrap gap-2">
-                    <label className="block text-sm font-medium text-gray-600 dark:text-gray-300">
-                        Спектр аудио в реальном времени
-                    </label>
+                 <div className="flex justify-between items-center mb-2 flex-wrap gap-x-4 gap-y-2">
                     <div className="flex items-center gap-4">
                         <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
                           <label htmlFor="vibration-toggle" className="cursor-pointer select-none">Вибрация</label>
@@ -275,6 +273,14 @@ const Receiver: React.FC<ReceiverProps> = ({ isCollapsed, onToggle }) => {
                               />
                           </button>
                         </div>
+                    </div>
+                </div>
+
+                <div className="flex justify-between items-center mb-1 flex-wrap gap-2">
+                    <label className="block text-sm font-medium text-gray-600 dark:text-gray-300">
+                        Спектр аудио в реальном времени
+                    </label>
+                    <div className="flex items-center gap-4">
                         <QualityIndicator quality={signalQuality} isListening={isListening} />
                         {isListening && (
                             <span className="text-xs text-gray-500 dark:text-gray-400" title="Порог обнаружения сигнала">
@@ -283,7 +289,7 @@ const Receiver: React.FC<ReceiverProps> = ({ isCollapsed, onToggle }) => {
                         )}
                     </div>
                 </div>
-                <FrequencyVisualizer data={frequencyData} isListening={isListening} sampleRate={sampleRate} threshold={currentThreshold} />
+                <FrequencyVisualizer data={frequencyData} isListening={isListening} sampleRate={sampleRate} threshold={currentThreshold} frequencies={Object.fromEntries(FSK_CHAR_TO_FREQ_MAP)} />
             </div>
           </div>
         </div>

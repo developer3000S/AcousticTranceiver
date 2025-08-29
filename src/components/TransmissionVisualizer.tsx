@@ -42,7 +42,7 @@ const TransmissionVisualizer: React.FC<TransmissionVisualizerProps> = ({ current
           />
         </>
       ) : (
-        <p className="text-gray-500 w-full text-center text-sm">Ожидание передачи...</p>
+        <div className="w-full h-1 bg-gray-200 dark:bg-gray-800 rounded-full" />
       )}
     </div>
   );

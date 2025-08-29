@@ -1,4 +1,5 @@
-import { Protocol } from '../constants';
+// FIX: Replaced 'Protocol' with 'TransmissionProtocol' as it is the correct exported type.
+import { TransmissionProtocol } from '../constants';
 import logger from './logger';
 
 let audioContext: AudioContext | null = null;
@@ -48,7 +49,8 @@ const playTones = (frequencies: number[], duration: number, volume: number): Pro
 export const playMessage = async (
   message: string,
   volume: number,
-  protocol: Protocol,
+  // FIX: Replaced 'Protocol' with 'TransmissionProtocol' as it is the correct exported type.
+  protocol: TransmissionProtocol,
   onProgress: (currentIndex: number | null, totalLength: number, currentToken: string | null, currentFreq: number | null) => void
 ): Promise<void> => {
   logger.info('Starting message transmission:', message);
@@ -141,7 +143,8 @@ const bufferToWav = (buffer: AudioBuffer): Blob => {
 export const generateMessageWav = async (
     message: string,
     volume: number,
-    protocol: Protocol,
+    // FIX: Replaced 'Protocol' with 'TransmissionProtocol' as it is the correct exported type.
+    protocol: TransmissionProtocol,
 ): Promise<Blob | null> => {
     try {
         logger.info('Starting WAV generation for message:', message);

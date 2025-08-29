@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { playMessage, generateMessageWav } from '../services/audioService';
 import logger from '../services/logger';
-import { ProtocolId, PROTOCOLS, Protocol, TEXT_ENCODING_MAP } from '../constants';
-import TransmissionVisualizer from './TransmissionVisualizer';
+import { TRANSMISSION_PROTOCOL, TransmissionProtocol, TEXT_ENCODING_MAP } from '../constants';
 import soundService from '../services/soundService';
 
 interface SenderProps {
@@ -11,7 +10,7 @@ interface SenderProps {
 }
 
 const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
-  const [message, setMessage] = useState<string>('Привет!');
+  const [message, setMessage] = useState<string>('привет мир');
   const [isTransmitting, setIsTransmitting] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [isTesting, setIsTesting] = useState<boolean>(false);
@@ -20,16 +19,16 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
   const [transmittingChar, setTransmittingChar] = useState<string | null>(null);
   const [transmittingFreq, setTransmittingFreq] = useState<number | null>(null);
   
-  const [protocolId, setProtocolId] = useState<ProtocolId>('dtmf_standard');
   const [volume, setVolume] = useState<number>(1);
-  const [toneDuration, setToneDuration] = useState<number>(PROTOCOLS.dtmf_standard.toneDuration);
-  const [pauseDuration, setPauseDuration] = useState<number>(PROTOCOLS.dtmf_standard.pauseDuration);
-
   const [error, setError] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState<boolean>(false);
   const [wavUrl, setWavUrl] = useState<string | null>(null);
 
-  const initialTemplates = ["Да", "Как дела?", "Нет", "Перезвони мне", "Пока", "Привет!", "Скоро буду", "Спасибо!", "Хорошо", "Я за рулем"];
+  // Settings state
+  const [isSettingsVisible, setIsSettingsVisible] = useState(false);
+  const [toneDuration, setToneDuration] = useState<number>(TRANSMISSION_PROTOCOL.toneDuration);
+  const [pauseDuration, setPauseDuration] = useState<number>(TRANSMISSION_PROTOCOL.pauseDuration);
+
+  const initialTemplates = ["тест 123", "как дела?", "5550123", "пока"];
 
   const [templates, setTemplates] = useState<string[]>(() => {
     try {
@@ -42,23 +41,15 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
   });
   const [selectedTemplate, setSelectedTemplate] = useState<string>('');
   
-  const currentProtocol = useMemo((): Protocol => {
-    if (protocolId === 'custom') {
+  const currentProtocol = useMemo((): TransmissionProtocol => {
       return {
-        ...PROTOCOLS.custom,
-        toneDuration,
-        pauseDuration,
+          ...TRANSMISSION_PROTOCOL,
+          toneDuration,
+          pauseDuration,
+          name: 'Пользовательский',
+          description: `Тон: ${toneDuration}мс, Пауза: ${pauseDuration}мс`
       };
-    }
-    return PROTOCOLS[protocolId];
-  }, [protocolId, toneDuration, pauseDuration]);
-  
-  useEffect(() => {
-    if (protocolId !== 'custom') {
-      setToneDuration(currentProtocol.toneDuration);
-      setPauseDuration(currentProtocol.pauseDuration);
-    }
-  }, [protocolId, currentProtocol]);
+  }, [toneDuration, pauseDuration]);
 
   useEffect(() => {
     try {
@@ -111,7 +102,7 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
 
   const handleSaveMessageAsTemplate = () => {
     soundService.playClick();
-    const trimmedMessage = message.trim();
+    const trimmedMessage = message.trim().toLowerCase();
     if (!trimmedMessage || templates.includes(trimmedMessage)) return;
     const newTemplates = [...templates, trimmedMessage].sort((a, b) => a.localeCompare(b));
     setTemplates(newTemplates);
@@ -122,11 +113,14 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
   const commonButtonDisabled = isTransmitting || isSaving || isTesting;
 
   const isCharSupported = (char: string): boolean => {
-    return TEXT_ENCODING_MAP.has(char.toLowerCase()) && !['*', '#'].includes(char);
+    // Check against the characters defined in our encoding map.
+    return TEXT_ENCODING_MAP.has(char.toLowerCase());
   };
 
   const getTransmissionPayload = (msg: string): string => {
-    return msg.split('').filter(isCharSupported).join('');
+    // This function now just filters the message based on supported characters.
+    // The actual encoding to digits is handled by the protocol's transform function.
+    return msg.toLowerCase().split('').filter(isCharSupported).join('');
   }
 
   const handleTransmit = async () => {
@@ -144,14 +138,16 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
         setIsTransmitting(false);
         return;
       }
-      logger.info(`Начало передачи аудио (протокол: ${currentProtocol.name})...`);
+      logger.info(`Начало передачи аудио... (${currentProtocol.description})`);
       
       await playMessage(
         payload, 
         volume, 
         currentProtocol,
         (index, totalLength, token, freq) => {
-            setTransmittingFreq(freq);
+            // FSK uses single frequencies, so we expect a number, not an array.
+            const currentFreq = Array.isArray(freq) ? freq[0] : freq;
+            setTransmittingFreq(currentFreq);
             setTransmittingChar(token);
             if (index !== null) {
                 setTransmissionProgress(((index + 1) / totalLength) * 100);
@@ -178,19 +174,20 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
     soundService.playClick();
     if (commonButtonDisabled) return;
 
-    const messageToTest = "тест 123";
+    const messageToTest = "тест 12345";
     
     setError(null);
     setIsTesting(true);
     try {
         const payload = getTransmissionPayload(messageToTest);
-        logger.info(`Начало тестовой передачи (протокол: ${currentProtocol.name})...`);
+        logger.info(`Начало тестовой передачи... (${currentProtocol.description})`);
         await playMessage(
             payload, 
             volume, 
             currentProtocol,
             (index, totalLength, token, freq) => {
-                setTransmittingFreq(freq);
+                const currentFreq = Array.isArray(freq) ? freq[0] : freq;
+                setTransmittingFreq(currentFreq);
                 setTransmittingChar(token);
                 if (index !== null) {
                     setTransmissionProgress(((index + 1) / totalLength) * 100);
@@ -203,9 +200,9 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
         );
         logger.info('Тестовая передача завершена.');
     } catch (err) {
-        logger.error('Ошибка во время тестовой передачи', err);
-        setError('Не удалось выполнить тестовую передачу.');
-        soundService.playError();
+      logger.error('Ошибка во время тестовой передачи', err);
+      setError('Не удалось выполнить тестовую передачу.');
+      soundService.playError();
     } finally {
         setIsTesting(false);
         setTransmissionProgress(0);
@@ -227,7 +224,7 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
         setIsSaving(false);
         return;
       }
-      logger.info(`Начало генерации WAV файла (протокол: ${currentProtocol.name})...`);
+      logger.info(`Начало генерации WAV файла... (${currentProtocol.description})`);
       const blob = await generateMessageWav(payload, volume, currentProtocol);
 
       if (blob) {
@@ -267,7 +264,7 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
   };
 
   const hasUnsupportedChars = useMemo(() => message.split('').some(char => !isCharSupported(char)), [message]);
-  const canSaveAsTemplate = message.trim() && !templates.includes(message.trim());
+  const canSaveAsTemplate = message.trim() && !templates.includes(message.trim().toLowerCase()) && getTransmissionPayload(message).length > 0;
   
   const effectiveMessageLength = useMemo(() => {
     const payload = getTransmissionPayload(message);
@@ -370,91 +367,37 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
               </div>
             </div>
 
-            <TransmissionVisualizer currentFrequency={transmittingFreq} charToFreqMap={currentProtocol.charToFreqMap} />
-
-            <button
-              onClick={() => { soundService.playClick(); setShowSettings(!showSettings); }}
-              className="w-full flex justify-between items-center text-left text-sm font-medium text-gray-600 dark:text-gray-300 hover:text-cyan-500 dark:hover:text-cyan-400 transition-colors py-2 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-gray-950 focus:ring-cyan-500 rounded-md px-2"
-              aria-expanded={showSettings} aria-controls="sender-settings"
-            >
-              <span className="flex items-center gap-2">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                  <span>Настройки передачи</span>
-              </span>
-              <svg xmlns="http://www.w3.org/2000/svg" className={`h-5 w-5 transition-transform duration-300 ${showSettings ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
-            </button>
-            <div
-              id="sender-settings"
-              className={`transition-all duration-500 ease-in-out overflow-hidden ${showSettings ? 'max-h-[800px] opacity-100 pt-4 mt-2 border-t border-gray-200 dark:border-gray-800' : 'max-h-0 opacity-0'}`}
-            >
-              <div className="space-y-6">
-                <fieldset>
-                    <legend className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Режим передачи</legend>
-                    <div className="space-y-2">
-                        {Object.values(PROTOCOLS).filter(p => p.id !== 'custom').map(protocol => (
-                            <label key={protocol.id} className="flex items-start p-3 bg-gray-100 dark:bg-gray-900 rounded-md cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors border border-gray-200 dark:border-gray-800 has-[:checked]:border-cyan-500 has-[:checked]:bg-cyan-500/10 dark:has-[:checked]:bg-cyan-900/20">
-                                <input
-                                    type="radio" name="protocol" value={protocol.id} checked={protocolId === protocol.id}
-                                    onChange={() => setProtocolId(protocol.id)}
-                                    className="h-4 w-4 mt-1 text-cyan-600 bg-gray-300 dark:bg-gray-700 border-gray-400 dark:border-gray-600 focus:ring-cyan-500"
-                                    disabled={commonButtonDisabled}
-                                />
-                                <div className="ml-3 text-sm">
-                                    <span className="font-medium text-gray-900 dark:text-white">{protocol.name}</span>
-                                    <p className="text-gray-600 dark:text-gray-400">{protocol.description}</p>
-                                </div>
-                            </label>
-                        ))}
-                    </div>
-                </fieldset>
-
-                <div className="p-4 bg-gray-100 dark:bg-gray-900 rounded-md border border-gray-200 dark:border-gray-800 space-y-4">
-                  <p className={`text-sm font-medium text-center transition-colors ${protocolId === 'custom' ? 'text-cyan-500 dark:text-cyan-400' : 'text-gray-600 dark:text-gray-300'}`}>
-                    {protocolId === 'custom' ? 'Выбран пользовательский режим' : 'Ручная настройка (переключит в Пользовательский режим)'}
-                  </p>
-                  <div>
-                    <label htmlFor="tone-duration-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Длительность тона</label>
-                    <div className="flex items-center gap-4">
-                      <input
-                        id="tone-duration-slider" type="range" min="50" max="600" step="10" value={toneDuration}
-                        onChange={(e) => { setToneDuration(parseInt(e.target.value, 10)); setProtocolId('custom'); }}
-                        className="w-full h-2 bg-gray-300 dark:bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:opacity-50"
-                        disabled={commonButtonDisabled}
-                      />
-                      <span className="text-sm font-medium text-gray-500 dark:text-gray-400 w-12 text-right">{toneDuration} мс</span>
-                    </div>
-                  </div>
-                  <div>
-                    <label htmlFor="pause-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Пауза между символами</label>
-                    <div className="flex items-center gap-4">
-                      <input
-                        id="pause-slider" type="range" min="25" max="500" step="5" value={pauseDuration}
-                        onChange={(e) => { setPauseDuration(parseInt(e.target.value, 10)); setProtocolId('custom'); }}
-                        className="w-full h-2 bg-gray-300 dark:bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:opacity-50"
-                        disabled={commonButtonDisabled}
-                      />
-                      <span className="text-sm font-medium text-gray-500 dark:text-gray-400 w-12 text-right">{pauseDuration} мс</span>
-                    </div>
-                  </div>
-                </div>
-                
+            {/* --- Settings Section --- */}
+            <div className="bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-800/50 rounded-lg p-4">
+              <button
+                onClick={() => {
+                  soundService.playClick();
+                  setIsSettingsVisible(!isSettingsVisible);
+                }}
+                className="w-full flex justify-between items-center text-left text-gray-700 dark:text-gray-300 font-semibold focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-50 dark:focus:ring-offset-gray-900 focus:ring-cyan-500 rounded"
+                aria-expanded={isSettingsVisible}
+              >
+                <span>Настройки передачи</span>
+                <svg xmlns="http://www.w3.org/2000/svg" className={`h-5 w-5 transition-transform duration-300 ${isSettingsVisible ? 'rotate-180' : ''}`} viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" /></svg>
+              </button>
+              <div className={`transition-all duration-500 ease-in-out overflow-hidden space-y-4 ${isSettingsVisible ? 'max-h-[500px] pt-4 mt-2 border-t border-gray-200 dark:border-gray-800' : 'max-h-0'}`}>
                 <div>
-                  <label htmlFor="volume-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Громкость передачи</label>
-                  <div className="flex items-center gap-4">
-                    <input
-                      id="volume-slider" type="range" min="0" max="1" step="0.01" value={volume}
-                      onChange={(e) => setVolume(parseFloat(e.target.value))}
-                      className="w-full h-2 bg-gray-300 dark:bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:opacity-50"
-                      disabled={commonButtonDisabled}
-                    />
-                    <span className="text-sm font-medium text-gray-500 dark:text-gray-400 w-12 text-right">{Math.round(volume * 100)}%</span>
-                  </div>
+                  <label htmlFor="tone-duration-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Длительность тона: <span className="font-bold text-cyan-500 dark:text-cyan-400">{toneDuration} мс</span></label>
+                  <input id="tone-duration-slider" type="range" min="20" max="200" step="5" value={toneDuration} onChange={(e) => setToneDuration(parseInt(e.target.value, 10))} disabled={commonButtonDisabled} className="w-full h-2 bg-gray-300 dark:bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:opacity-50"/>
+                </div>
+                <div>
+                  <label htmlFor="pause-duration-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Пауза между символами: <span className="font-bold text-cyan-500 dark:text-cyan-400">{pauseDuration} мс</span></label>
+                  <input id="pause-duration-slider" type="range" min="20" max="200" step="5" value={pauseDuration} onChange={(e) => setPauseDuration(parseInt(e.target.value, 10))} disabled={commonButtonDisabled} className="w-full h-2 bg-gray-300 dark:bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:opacity-50"/>
+                </div>
+                <div>
+                  <label htmlFor="volume-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-2">Громкость передачи: <span className="font-bold text-cyan-500 dark:text-cyan-400">{Math.round(volume * 100)}%</span></label>
+                  <input id="volume-slider" type="range" min="0" max="1" step="0.05" value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} disabled={commonButtonDisabled} className="w-full h-2 bg-gray-300 dark:bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500 disabled:opacity-50"/>
                 </div>
               </div>
             </div>
             
             {(isTransmitting || isTesting) && (
-              <div className="pt-2">
+              <div className="pt-2 space-y-2">
                 <div className="flex justify-between items-center mb-1">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-cyan-500 dark:text-cyan-300">{isTesting ? 'Прогресс теста:' : 'Передача:'}</span>
@@ -490,13 +433,13 @@ const Sender: React.FC<SenderProps> = ({ isCollapsed, onToggle }) => {
 
             <div className="flex flex-col sm:flex-row gap-4">
               <button
-                onClick={handleTransmit} disabled={commonButtonDisabled || !message}
+                onClick={handleTransmit} disabled={commonButtonDisabled || !message || hasUnsupportedChars}
                 className="w-full flex justify-center items-center px-4 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-cyan-600 hover:bg-cyan-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-black focus:ring-cyan-500 disabled:bg-gray-400 dark:disabled:bg-gray-700 disabled:cursor-not-allowed transition-all"
               >
                 Передать аудио
               </button>
               <button
-                onClick={handleSave} disabled={commonButtonDisabled || !message}
+                onClick={handleSave} disabled={commonButtonDisabled || !message || hasUnsupportedChars}
                 className="w-full flex justify-center items-center px-4 py-3 border border-gray-400 dark:border-gray-700 text-base font-medium rounded-md shadow-sm text-gray-800 dark:text-gray-200 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-black focus:ring-gray-500 disabled:bg-gray-400 dark:disabled:bg-gray-700 disabled:cursor-not-allowed transition-all"
               >
                 Сохранить .wav

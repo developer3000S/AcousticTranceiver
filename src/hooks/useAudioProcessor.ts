@@ -1,9 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   RECEIVER_CONFIG,
-  DTMF_FREQUENCIES,
-  DTMF_CHARACTERS,
-  TEXT_DECODING_MAP
+  FSK_CHARACTERS,
+  FSK_CHAR_TO_FREQ_MAP,
+  TEXT_DECODING_MAP,
 } from '../constants';
 import logger from '../services/logger';
 import soundService from '../services/soundService';
@@ -55,23 +55,6 @@ const calculateSignalQuality = (
   return 'poor';
 };
 
-const findPeakInBand = (
-    dataArray: Uint8Array,
-    startBin: number,
-    endBin: number,
-    freqPerBin: number
-): { peakFreq: number; peakAmp: number } => {
-    let peakAmp = 0;
-    let peakBin = 0;
-    for (let i = startBin; i <= endBin; i++) {
-        if (dataArray[i] > peakAmp) {
-            peakAmp = dataArray[i];
-            peakBin = i;
-        }
-    }
-    return { peakFreq: peakBin * freqPerBin, peakAmp };
-};
-
 export const useAudioProcessor = (): AudioProcessorState => {
   const [isListening, setIsListening] = useState(false);
   const [decodedMessages, setDecodedMessages] = useState<DecodedMessage[]>(() => {
@@ -95,12 +78,12 @@ export const useAudioProcessor = (): AudioProcessorState => {
   const streamRef = useRef<MediaStream | null>(null);
   const animationFrameIdRef = useRef<number>(0);
   
-  const receivingStateRef = useRef<'IDLE' | 'DTMF_TEXT'>('IDLE');
+  const receivingStateRef = useRef<'IDLE' | 'RECEIVING'>('IDLE');
+  const decoderStateRef = useRef<'WAITING_FOR_TONE' | 'WAITING_FOR_SILENCE'>('WAITING_FOR_TONE');
   const currentMessageBufferRef = useRef<string>('');
-  const lastCharTimestampRef = useRef<number>(0);
-  const decoderStateRef = useRef<'IDLE' | 'COOLDOWN'>('IDLE');
-  const quietFramesCountRef = useRef(0);
+  const lastCharTimestampRef = useRef<number>(0); // For 5s message timeout
   const ambientNoiseLevelRef = useRef(40);
+  const silenceFramesCounterRef = useRef(0);
 
   useEffect(() => {
     try {
@@ -110,94 +93,133 @@ export const useAudioProcessor = (): AudioProcessorState => {
     }
   }, [decodedMessages]);
 
+  /**
+   * Централизованная функция для обработки ошибок декодирования.
+   * Воспроизводит звук ошибки, записывает в журнал и добавляет сообщение об ошибке в UI.
+   * @param reason - Причина ошибки.
+   * @param bufferContent - Содержимое буфера на момент ошибки.
+   */
+  const handleDecodingError = useCallback((reason: 'Тайм-аут' | 'Новый старт', bufferContent: string) => {
+    const timestamp = new Date().toLocaleTimeString('ru-RU');
+    soundService.playError();
+
+    let logMessage = '';
+    switch(reason) {
+        case 'Тайм-аут':
+            logMessage = `Сообщение не завершено в течение 5с. Сброс. Буфер: "${bufferContent}"`;
+            break;
+        case 'Новый старт':
+            logMessage = `Новый стартовый сигнал (*) получен во время активной сессии. Предыдущее сообщение отброшено. Буфер: "${bufferContent}"`;
+            break;
+    }
+    logger.warn(logMessage);
+
+    if (bufferContent.length > 0) {
+      setDecodedMessages(prev => [...prev, { text: `[${reason}: ${bufferContent}]`, status: 'error', timestamp }]);
+    }
+    
+    // Reset state after error
+    receivingStateRef.current = 'IDLE';
+    currentMessageBufferRef.current = '';
+    lastCharTimestampRef.current = 0;
+  }, []);
+  
+  /**
+   * Decodes a string of digit pairs back into text.
+   * @param digitString The string of digits received between '*' and '#'.
+   * @returns The decoded text message. Returns an error string if decoding fails.
+   */
+  const decodeMessageFromDigits = (digitString: string): { text: string; status: MessageStatus } => {
+    if (digitString.length % 2 !== 0) {
+      logger.error(`Ошибка декодирования: нечетное количество цифр (${digitString.length}). Пакет: "${digitString}"`);
+      return { text: `[Ошибка: Нечетные данные]`, status: 'error' };
+    }
+
+    let decodedText = '';
+    for (let i = 0; i < digitString.length; i += 2) {
+      const pair = digitString.substring(i, i + 2);
+      const char = TEXT_DECODING_MAP.get(pair);
+      if (char) {
+        decodedText += char;
+      } else {
+        logger.warn(`Ошибка декодирования: неизвестный код '${pair}' в пакете "${digitString}"`);
+        decodedText += '�'; // Replacement character for unknown codes
+      }
+    }
+    return { text: decodedText, status: 'success' };
+  };
+
   const processDecodedChar = useCallback((char: string) => {
     logger.log(`Символ декодирован: '${char}'`);
-    lastCharTimestampRef.current = performance.now();
+    lastCharTimestampRef.current = performance.now(); // Update the 5s message timeout timer
     const timestamp = new Date().toLocaleTimeString('ru-RU');
 
     switch (char) {
         case '*':
-            if (receivingStateRef.current !== 'IDLE' && currentMessageBufferRef.current.length > 0) {
-                logger.warn(`Новый стартовый сигнал (*) получен во время активной сессии. Предыдущее сообщение отброшено.`);
-                const prevBuffer = currentMessageBufferRef.current;
-                soundService.playError();
-                setDecodedMessages(prev => [...prev, { text: `[Отброшено: ${prevBuffer}]`, status: 'error', timestamp }]);
-            } else if (receivingStateRef.current !== 'IDLE') {
-                logger.warn(`Новый стартовый сигнал (*) получен во время активной сессии. Сброс.`);
+            if (receivingStateRef.current === 'RECEIVING' && currentMessageBufferRef.current.length > 0) {
+                // An active session is being interrupted. Handle it as an error.
+                handleDecodingError('Новый старт', currentMessageBufferRef.current);
             }
-            receivingStateRef.current = 'DTMF_TEXT';
+            // Start the new session
+            receivingStateRef.current = 'RECEIVING';
             currentMessageBufferRef.current = '';
-            logger.info('Стартовый сигнал DTMF (*) обнаружен. Начало приема.');
+            lastCharTimestampRef.current = performance.now(); // Reset timer for the new message
+            logger.info('Стартовый сигнал (*) обнаружен. Начало приема.');
             break;
 
         case '#':
-            if (receivingStateRef.current === 'DTMF_TEXT') {
-                const digitString = currentMessageBufferRef.current;
-                logger.info(`Стоп-сигнал DTMF (#) обнаружен. Строка цифр: "${digitString}"`);
+            if (receivingStateRef.current === 'RECEIVING') {
+                const receivedDigitString = currentMessageBufferRef.current;
+                logger.info(`Стоп-сигнал (#) обнаружен. Цифровой пакет: "${receivedDigitString}"`);
 
-                if (digitString.length > 0 && digitString.length % 2 === 0) {
-                    let decodedText = '';
-                    for (let i = 0; i < digitString.length; i += 2) {
-                        const code = digitString.substring(i, i + 2);
-                        const decodedChar = TEXT_DECODING_MAP.get(code);
-                        if (decodedChar) {
-                            decodedText += decodedChar;
-                        } else {
-                            logger.warn(`Неизвестный двухзначный код: ${code}`);
-                            decodedText += '?';
-                        }
+                if (receivedDigitString.length > 0) {
+                    const { text: receivedText, status } = decodeMessageFromDigits(receivedDigitString);
+
+                    if (status === 'success') {
+                        soundService.playSuccess();
+                        logger.info(`Сообщение успешно декодировано: "${receivedText}"`);
+                    } else {
+                        soundService.playError();
+                        logger.warn(`Ошибка при декодировании сообщения.`);
                     }
-                    logger.info(`Сообщение успешно декодировано: "${decodedText}"`);
-                    soundService.playSuccess();
-                    setDecodedMessages(prev => [...prev, { text: decodedText, status: 'success', timestamp }]);
+                    setDecodedMessages(prev => [...prev, { text: receivedText, status, timestamp }]);
+
                 } else {
-                    logger.error(`Получен поврежденный пакет. Длина нечетная или пустая: ${digitString.length}`);
-                    soundService.playError();
-                    if (digitString.length > 0) {
-                        setDecodedMessages(prev => [...prev, { text: `[Повреждено: ${digitString}]`, status: 'error', timestamp }]);
-                    }
+                    logger.warn(`Получен пустой пакет. Игнорируется.`);
                 }
+                
+                // Reset state on success or empty packet
+                receivingStateRef.current = 'IDLE';
+                currentMessageBufferRef.current = '';
+
             } else {
                 logger.warn(`Стоп-сигнал (#) получен вне сессии. Игнорируется.`);
             }
-            receivingStateRef.current = 'IDLE';
-            currentMessageBufferRef.current = '';
             break;
 
         default:
-            if (receivingStateRef.current === 'DTMF_TEXT') {
-                if (/\d/.test(char)) {
+            if (receivingStateRef.current === 'RECEIVING') {
+                if (FSK_CHARACTERS.includes(char)) {
                     currentMessageBufferRef.current += char;
                 } else {
-                    logger.warn(`Игнорируется нецифровой символ '${char}' во время приема.`);
+                    logger.warn(`Игнорируется неизвестный символ '${char}' во время приема.`);
                 }
             }
             break;
     }
-    
-    decoderStateRef.current = 'COOLDOWN';
-    quietFramesCountRef.current = 0;
-  }, []);
+  }, [handleDecodingError]);
 
   const analysisLoop = useCallback(() => {
     if (!analyserRef.current || !audioContextRef.current) return;
 
     const MESSAGE_TIMEOUT_MS = 5000;
     if (
-      receivingStateRef.current === 'DTMF_TEXT' &&
-      performance.now() - lastCharTimestampRef.current > MESSAGE_TIMEOUT_MS
+      receivingStateRef.current === 'RECEIVING' &&
+      performance.now() - lastCharTimestampRef.current > MESSAGE_TIMEOUT_MS &&
+      lastCharTimestampRef.current > 0 // Ensure it doesn't fire on init
     ) {
-      logger.warn(`Сообщение не завершено в течение ${MESSAGE_TIMEOUT_MS / 1000}с. Сброс.`);
-      const digitString = currentMessageBufferRef.current;
-
-      if (digitString.length > 0) {
-        soundService.playError();
-        const timestamp = new Date().toLocaleTimeString('ru-RU');
-        setDecodedMessages(prev => [...prev, { text: `[Тайм-аут: ${digitString}]`, status: 'error', timestamp }]);
-      }
-      
-      receivingStateRef.current = 'IDLE';
-      currentMessageBufferRef.current = '';
+      // Use centralized error handler for timeout
+      handleDecodingError('Тайм-аут', currentMessageBufferRef.current);
     }
 
     const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
@@ -226,53 +248,60 @@ export const useAudioProcessor = (): AudioProcessorState => {
     setSignalQuality(maxOverallAmplitude > newThreshold 
       ? calculateSignalQuality(maxOverallAmplitude, totalAmplitude, newThreshold, dataArray.length) 
       : 'none');
-
-    switch (decoderStateRef.current) {
-        case 'IDLE':
-            if (maxOverallAmplitude > newThreshold) {
-                const freqPerBin = audioContextRef.current.sampleRate / RECEIVER_CONFIG.FFT_SIZE;
-                
-                const lowBand = findPeakInBand(dataArray, Math.round(650 / freqPerBin), Math.round(1000 / freqPerBin), freqPerBin);
-                const highBand = findPeakInBand(dataArray, Math.round(1150 / freqPerBin), Math.round(1550 / freqPerBin), freqPerBin);
-
-                if (lowBand.peakAmp > newThreshold && highBand.peakAmp > newThreshold) {
-                    let matchedLowFreq = 0;
-                    let matchedHighFreq = 0;
-                    
-                    // Find the closest standard DTMF frequencies
-                    for (const char of DTMF_CHARACTERS) {
-                        const [lowFreq, highFreq] = DTMF_FREQUENCIES[char];
-                        if (Math.abs(lowBand.peakFreq - lowFreq) <= RECEIVER_CONFIG.DTMF_FREQUENCY_TOLERANCE) matchedLowFreq = lowFreq;
-                        if (Math.abs(highBand.peakFreq - highFreq) <= RECEIVER_CONFIG.DTMF_FREQUENCY_TOLERANCE) matchedHighFreq = highFreq;
-                    }
-
-                    if (matchedLowFreq && matchedHighFreq) {
-                        for (const char of DTMF_CHARACTERS) {
-                            const [lowFreq, highFreq] = DTMF_FREQUENCIES[char];
-                            if (lowFreq === matchedLowFreq && highFreq === matchedHighFreq) {
-                                processDecodedChar(char);
-                                break;
-                            }
-                        }
-                    }
+      
+    // State-based decoding logic. Prevents a single tone from being decoded multiple times.
+    if (decoderStateRef.current === 'WAITING_FOR_TONE') {
+        if (maxOverallAmplitude > newThreshold) {
+            const freqPerBin = audioContextRef.current.sampleRate / RECEIVER_CONFIG.FFT_SIZE;
+            
+            let peakBin = -1;
+            let peakAmp = 0;
+            // Find the bin with the highest amplitude
+            for(let i = 0; i < dataArray.length; i++) {
+                if (dataArray[i] > peakAmp) {
+                    peakAmp = dataArray[i];
+                    peakBin = i;
                 }
             }
-            break;
 
-        case 'COOLDOWN':
-            if (maxOverallAmplitude < newThreshold) {
-                quietFramesCountRef.current++;
-            } else {
-                quietFramesCountRef.current = 0;
+            if (peakBin !== -1) {
+                const peakFreq = peakBin * freqPerBin;
+
+                let bestMatchChar: string | null = null;
+                let minDistance = Infinity;
+
+                for (const [char, freq] of FSK_CHAR_TO_FREQ_MAP.entries()) {
+                    const distance = Math.abs(peakFreq - freq);
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        bestMatchChar = char;
+                    }
+                }
+
+                if (bestMatchChar && minDistance <= RECEIVER_CONFIG.FSK_FREQUENCY_TOLERANCE) {
+                    processDecodedChar(bestMatchChar);
+                    // Tone successfully decoded, now wait for silence before trying again.
+                    decoderStateRef.current = 'WAITING_FOR_SILENCE';
+                    silenceFramesCounterRef.current = 0;
+                }
             }
-            if (quietFramesCountRef.current >= 2) { // Use 2 frames (~33ms) to be compatible with fastest protocol (35ms pause).
-                decoderStateRef.current = 'IDLE';
-            }
-            break;
+        }
+    } else if (decoderStateRef.current === 'WAITING_FOR_SILENCE') {
+        if (maxOverallAmplitude < newThreshold) {
+            silenceFramesCounterRef.current++;
+        } else {
+            silenceFramesCounterRef.current = 0;
+        }
+        
+        // Require only one frame of silence for faster response to short pauses.
+        if (silenceFramesCounterRef.current >= 1) {
+            decoderStateRef.current = 'WAITING_FOR_TONE';
+            silenceFramesCounterRef.current = 0;
+        }
     }
 
     animationFrameIdRef.current = requestAnimationFrame(analysisLoop);
-  }, [currentThreshold, processDecodedChar]);
+  }, [currentThreshold, processDecodedChar, handleDecodingError]);
   
   const startListening = useCallback(async () => {
     if (isListening) return;
@@ -297,10 +326,10 @@ export const useAudioProcessor = (): AudioProcessorState => {
       setError(null);
       
       receivingStateRef.current = 'IDLE';
+      decoderStateRef.current = 'WAITING_FOR_TONE';
       currentMessageBufferRef.current = '';
       lastCharTimestampRef.current = 0;
-      decoderStateRef.current = 'IDLE';
-      quietFramesCountRef.current = 0;
+      silenceFramesCounterRef.current = 0;
 
       animationFrameIdRef.current = requestAnimationFrame(analysisLoop);
       logger.info('Прослушивание успешно начато.');
@@ -327,9 +356,8 @@ export const useAudioProcessor = (): AudioProcessorState => {
     analyserRef.current = null;
 
     receivingStateRef.current = 'IDLE';
+    decoderStateRef.current = 'WAITING_FOR_TONE';
     currentMessageBufferRef.current = '';
-    decoderStateRef.current = 'IDLE';
-    quietFramesCountRef.current = 0;
     logger.info('Состояние приемника сброшено.');
 
     setIsListening(false);

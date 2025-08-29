@@ -1,24 +1,25 @@
 import React, { useMemo } from 'react';
-import { RECEIVER_CONFIG, DTMF_FREQUENCIES } from '../constants';
+import { RECEIVER_CONFIG } from '../constants';
 
 interface FrequencyVisualizerProps {
   data: Uint8Array;
   isListening: boolean;
   sampleRate: number;
   threshold: number;
+  frequencies: { [key: string]: number | [number, number] };
 }
 
 const NUM_BINS_TO_SHOW = 256;
 
-const FrequencyVisualizer: React.FC<FrequencyVisualizerProps> = ({ data, isListening, sampleRate, threshold }) => {
+const FrequencyVisualizer: React.FC<FrequencyVisualizerProps> = ({ data, isListening, sampleRate, threshold, frequencies }) => {
   const validBins = useMemo(() => {
     const FREQ_PER_BIN = sampleRate / RECEIVER_CONFIG.FFT_SIZE;
     if (FREQ_PER_BIN === 0) return new Set<number>(); // Prevent division by zero
 
     const bins = new Set<number>();
-    const tolerance = RECEIVER_CONFIG.DTMF_FREQUENCY_TOLERANCE; // 15 Hz
+    const tolerance = RECEIVER_CONFIG.FSK_FREQUENCY_TOLERANCE; 
 
-    const uniqueFrequencies = [...new Set(Object.values(DTMF_FREQUENCIES).flat())];
+    const uniqueFrequencies = [...new Set(Object.values(frequencies).flat())];
 
     uniqueFrequencies.forEach(centerFreq => {
       const startFreq = centerFreq - tolerance;
@@ -35,7 +36,7 @@ const FrequencyVisualizer: React.FC<FrequencyVisualizerProps> = ({ data, isListe
     });
 
     return bins;
-  }, [sampleRate]);
+  }, [sampleRate, frequencies]);
 
   const relevantBins = useMemo(() => Array.from(data).slice(0, NUM_BINS_TO_SHOW), [data]);
 

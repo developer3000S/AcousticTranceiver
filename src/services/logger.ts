@@ -26,7 +26,15 @@ const addLog = (level: LogLevel, ...args: any[]) => {
   });
   
   const messageContent = args
-    .map(arg => (typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)))
+    .map(arg => {
+        if (arg instanceof Error) {
+            return `${arg.name}: ${arg.message}`;
+        }
+        if (typeof arg === 'object' && arg !== null) {
+            return JSON.stringify(arg, null, 2);
+        }
+        return String(arg);
+    })
     .join(' ');
 
   const entry: LogEntry = { timestamp, level, message: `[${level}] ${messageContent}` };
